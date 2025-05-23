@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.iocoder.yudao.module.dataqc.dal.mysql.drug.HosResourceInfoMapper">
+    <!-- 查询最新季度数据 -->
+    <select id="selectLatestByHospital" resultType="HosResourceInfoDO">
+        SELECT * FROM gh_hos_resource_info
+        WHERE hospital_code = #{hospitalCode}
+          AND deleted = 0
+        ORDER BY stat_date DESC
+            LIMIT 1
+    </select>
+
+    <!-- 查询资源趋势 -->
+    <select id="selectResourceTrend" resultType="map">
+        SELECT
+            stat_date,
+            CASE
+                WHEN SUBSTR(stat_date, 5, 2) IN ('01', '02', '03') THEN '第一季度'
+                WHEN SUBSTR(stat_date, 5, 2) IN ('04', '05', '06') THEN '第二季度'
+                WHEN SUBSTR(stat_date, 5, 2) IN ('07', '08', '09') THEN '第三季度'
+                ELSE '第四季度'
+                END as quarter,
+            beds_num,
+            prac_docker_num,
+            ass_docker_num,
+            visit_count,
+            leave_hos_count,
+            drug_sell_amount,
+            yp_purchase_amount + kl_purchase_amount as tcm_purchase_amount,
+            yp_sell_amount + kl_sell_amount as tcm_sell_amount
+        FROM gh_hos_resource_info
+        WHERE hospital_code = #{hospitalCode}
+          AND stat_date LIKE CONCAT(#{year}, '%')
+          AND deleted = 0
+        ORDER BY stat_date
+    </select>
+
+    <!-- 获取机构对比数据 -->
+    <select id="selectHospitalComparison" resultType="map">
+        SELECT
+            hospital_code,
+            organization_name,
+            beds_num,
+            prac_docker_num + ass_docker_num as total_docker_num,
+            visit_count,
+            leave_hos_count,
+            drug_sell_amount,
+            ROUND(drug_sell_amount / visit_count, 2) as avg_drug_cost,
+            ROUND(visit_count / (prac_docker_num + ass_docker_num), 2) as docker_efficiency
+        FROM gh_hos_resource_info
+        WHERE stat_date = #{statDate}
+          AND deleted = 0
+        ORDER BY drug_sell_amount DESC
+    </select>
+</mapper>

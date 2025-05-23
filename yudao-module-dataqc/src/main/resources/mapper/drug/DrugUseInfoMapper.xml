@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.iocoder.yudao.module.dataqc.dal.mysql.drug.DrugUseInfoMapper">
+    <!-- 获取使用统计 -->
+    <select id="selectUseStatistics" parameterType="DrugUseInfoPageReqVO" resultType="map">
+        SELECT
+        COUNT(*) as totalCount,
+        SUM(sell_pack_quantity) as totalQuantity,
+        ROUND(SUM(sell_pack_quantity * sell_pack_price), 2) as totalAmount,
+        COUNT(DISTINCT hos_drug_id) as drugTypeCount,
+        COUNT(DISTINCT department_code) as departmentCount,
+        ROUND(AVG(sell_pack_price), 2) as avgPrice
+        FROM gh_drug_use_info
+        WHERE deleted = 0
+        <if test="hospitalCode != null and hospitalCode != ''">
+            AND hospital_code = #{hospitalCode}
+        </if>
+        <if test="beginDate != null and beginDate != ''">
+            AND sell_date >= #{beginDate}
+        </if>
+        <if test="endDate != null and endDate != ''">
+            AND sell_date <= #{endDate}
+        </if>
+    </select>
+
+    <!-- 获取科室用药排名 -->
+    <select id="selectDepartmentRanking" resultType="map">
+        SELECT
+        a.department_code,
+        a.department_name,
+        COUNT(*) as prescriptionCount,
+        COUNT(DISTINCT a.hos_drug_id) as drugTypeCount,
+        SUM(a.sell_pack_quantity) as totalQuantity,
+        ROUND(SUM(a.sell_pack_quantity * a.sell_pack_price), 2) as totalAmount,
+        <!-- 计算基药使用率 -->
+        ROUND(SUM(CASE WHEN b.base_flag = '1' THEN a.sell_pack_quantity * a.sell_pack_price ELSE 0 END)
+        / SUM(a.sell_pack_quantity * a.sell_pack_price) * 100, 2) as baseDrugRate
+        FROM gh_drug_use_info a
+        LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
+        WHERE a.deleted = 0
+        <if test="startDate != null and startDate != ''">
+            AND a.sell_date >= #{startDate}
+        </if>
+        <if test="endDate != null and endDate != ''">
+            AND a.sell_date <= #{endDate}
+        </if>
+        GROUP BY a.department_code, a.department_name
+        ORDER BY totalAmount DESC
+    </select>
+
+    <!-- 获取药品使用排名 -->
+    <select id="selectDrugUseRanking" resultType="map">
+        SELECT
+        a.hos_drug_id,
+        a.product_name,
+        b.drug_spec,
+        b.manufacturer,
+        b.base_flag,
+        COUNT(*) as useCount,
+        SUM(a.sell_pack_quantity) as totalQuantity,
+        ROUND(SUM(a.sell_pack_quantity * a.sell_pack_price), 2) as totalAmount,
+        ROUND(AVG(a.sell_pack_price), 2) as avgPrice
+        FROM gh_drug_use_info a
+        LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
+        WHERE a.deleted = 0
+        <if test="startDate != null and startDate != ''">
+            AND a.sell_date >= #{startDate}
+        </if>
+        <if test="endDate != null and endDate != ''">
+            AND a.sell_date <= #{endDate}
+        </if>
+        GROUP BY a.hos_drug_id, a.product_name, b.drug_spec, b.manufacturer, b.base_flag
+        ORDER BY totalAmount DESC
+        <if test="limit != null">
+            LIMIT #{limit}
+        </if>
+    </select>
+
+    <!-- 基药使用分析 -->
+    <select id="selectBaseDrugAnalysis" resultType="map">
+        SELECT
+        <!-- 基药使用金额 -->
+        ROUND(SUM(CASE WHEN b.base_flag = '1' THEN a.sell_pack_quantity * a.sell_pack_price ELSE 0 END), 2) as baseDrugAmount,
+        <!-- 非基药使用金额 -->
+        ROUND(SUM(CASE WHEN b.base_flag = '2' THEN a.sell_pack_quantity * a.sell_pack_price ELSE 0 END), 2) as nonBaseDrugAmount,
+        <!-- 总金额 -->
+        ROUND(SUM(a.sell_pack_quantity * a.sell_pack_price), 2) as totalAmount,
+        <!-- 基药使用率 -->
+        ROUND(SUM(CASE WHEN b.base_flag = '1' THEN a.sell_pack_quantity * a.sell_pack_price ELSE 0 END)
+        / SUM(a.sell_pack_quantity * a.sell_pack_price) * 100, 2) as baseDrugRate,
+        <!-- 基药品种数 -->
+        COUNT(DISTINCT CASE WHEN b.base_flag = '1' THEN a.hos_drug_id END) as baseDrugCount,
+        <!-- 总品种数 -->
+        COUNT(DISTINCT a.hos_drug_id) as totalDrugCount
+        FROM gh_drug_use_info a
+        LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
+        WHERE a.deleted = 0
+        <if test="startDate != null and startDate != ''">
+            AND a.sell_date >= #{startDate}
+        </if>
+        <if test="endDate != null and endDate != ''">
+            AND a.sell_date <= #{endDate}
+        </if>
+    </select>
+
+    <!-- 按患者类型统计 -->
+    <select id="selectPatientTypeStats" resultType="map">
+        SELECT
+        CASE patient_type
+        WHEN '1' THEN '门诊'
+        WHEN '2' THEN '急诊'
+        WHEN '3' THEN '住院'
+        ELSE '其他'
+        END as patientTypeName,
+        patient_type,
+        COUNT(*) as prescriptionCount,
+        SUM(sell_pack_quantity) as totalQuantity,
+        ROUND(SUM(sell_pack_quantity * sell_pack_price), 2) as totalAmount
+        FROM gh_drug_use_info
+        WHERE deleted = 0
+        <if test="startDate != null and startDate != ''">
+            AND sell_date >= #{startDate}
+        </if>
+        <if test="endDate != null and endDate != ''">
+            AND sell_date <= #{endDate}
+        </if>
+        GROUP BY patient_type
+        ORDER BY totalAmount DESC
+    </select>
+</mapper>

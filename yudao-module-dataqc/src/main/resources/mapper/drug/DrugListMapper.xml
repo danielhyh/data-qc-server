@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.iocoder.yudao.module.dataqc.dal.mysql.drug.DrugListMapper">
+
+        <resultMap type="cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.DrugListDO" id="GhDrugListResult">
+            <result property="id" column="id"/>
+            <result property="serialNum" column="serial_num"/>
+            <result property="domainCode" column="domain_code"/>
+            <result property="organizationCode" column="organization_code"/>
+            <result property="organizationName" column="organization_name"/>
+            <result property="hospitalCode" column="hospital_code"/>
+            <result property="uploadDate" column="upload_date"/>
+            <result property="ypid" column="ypid"/>
+            <result property="prDrugId" column="pr_drug_id"/>
+            <result property="hosDrugId" column="hos_drug_id"/>
+            <result property="approvalNum" column="approval_num"/>
+            <result property="drugName" column="drug_name"/>
+            <result property="productName" column="product_name"/>
+            <result property="tradeName" column="trade_name"/>
+            <result property="tradeEngName" column="trade_eng_name"/>
+            <result property="manufacturer" column="manufacturer"/>
+            <result property="drugForm" column="drug_form"/>
+            <result property="drugSpec" column="drug_spec"/>
+            <result property="dosageUnit" column="dosage_unit"/>
+            <result property="packUnit" column="pack_unit"/>
+            <result property="drugFactor" column="drug_factor"/>
+            <result property="unityPurchaseFlag" column="unity_purchase_flag"/>
+            <result property="baseFlag" column="base_flag"/>
+            <result property="uniformityFlag" column="uniformity_flag"/>
+            <result property="importBatchNo" column="import_batch_no"/>
+            <result property="importTime" column="import_time"/>
+            <result property="createTime" column="create_time"/>
+            <result property="updateTime" column="update_time"/>
+        </resultMap>
+
+        <!-- 根据YPID批量查询 -->
+        <select id="selectByYpidList" resultType="DrugListDO">
+            SELECT * FROM gh_drug_list
+            WHERE deleted = 0
+            AND ypid IN
+            <foreach collection="ypidList" item="ypid" open="(" separator="," close=")">
+                #{ypid}
+            </foreach>
+        </select>
+
+        <!-- 统计药品分类信息 -->
+        <select id="selectDrugCategoryStats" resultType="map">
+            SELECT
+                CASE
+                    WHEN base_flag = '1' THEN '基本药物'
+                    ELSE '非基本药物'
+                    END as category,
+                COUNT(*) as count,
+    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM gh_drug_list WHERE deleted = 0), 2) as percentage
+            FROM gh_drug_list
+            WHERE deleted = 0
+            GROUP BY base_flag
+
+            UNION ALL
+
+            SELECT
+                CASE
+                    WHEN unity_purchase_flag = '1' THEN '集中采购药品'
+                    ELSE '非集中采购药品'
+                    END as category,
+                COUNT(*) as count,
+    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM gh_drug_list WHERE deleted = 0), 2) as percentage
+            FROM gh_drug_list
+            WHERE deleted = 0
+            GROUP BY unity_purchase_flag
+
+            UNION ALL
+
+            SELECT
+                CASE
+                    WHEN uniformity_flag = '1' THEN '通过一致性评价'
+                    ELSE '未通过一致性评价'
+                    END as category,
+                COUNT(*) as count,
+    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM gh_drug_list WHERE deleted = 0), 2) as percentage
+            FROM gh_drug_list
+            WHERE deleted = 0
+            GROUP BY uniformity_flag
+        </select>
+
+        <!-- 获取药品总数统计 -->
+        <select id="selectDrugTotalStats" resultType="map">
+            SELECT COUNT(*)                                                   as totalCount,
+                   COUNT(DISTINCT manufacturer)                               as manufacturerCount,
+                   COUNT(DISTINCT drug_form)                                  as formCount,
+                   SUM(CASE WHEN base_flag = '1' THEN 1 ELSE 0 END)           as baseDrugCount,
+                   SUM(CASE WHEN unity_purchase_flag = '1' THEN 1 ELSE 0 END) as unityPurchaseCount,
+                   SUM(CASE WHEN uniformity_flag = '1' THEN 1 ELSE 0 END)     as uniformityCount
+            FROM gh_drug_list
+            WHERE deleted = 0
+        </select>
+
+</mapper>

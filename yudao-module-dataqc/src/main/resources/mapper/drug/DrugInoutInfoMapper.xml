@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.iocoder.yudao.module.dataqc.dal.mysql.drug.DrugInoutInfoMapper">
+    <!-- 查询库存汇总 -->
+    <select id="selectStockSummary" parameterType="DrugInoutInfoPageReqVO" resultType="map">
+        WITH stock_calc AS (
+        SELECT
+        a.hos_drug_id,
+        a.product_name,
+        b.drug_spec,
+        b.pack_unit,
+        b.manufacturer,
+        <!-- 计算入库总量 -->
+        COALESCE(SUM(CASE WHEN a.io_type = 'IN' THEN a.in_pack_quantity ELSE 0 END), 0) as total_in,
+        <!-- 计算出库总量 -->
+        COALESCE(SUM(CASE WHEN a.io_type = 'OUT' THEN a.out_pack_quantity ELSE 0 END), 0) as total_out,
+        <!-- 计算最新入库价格 -->
+        (SELECT in_pack_price FROM gh_drug_inout_info
+        WHERE hos_drug_id = a.hos_drug_id AND io_type = 'IN' AND deleted = 0
+        ORDER BY out_in_date DESC LIMIT 1) as latest_price
+        FROM gh_drug_inout_info a
+        LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
+        WHERE a.deleted = 0
+        <if test="hospitalCode != null and hospitalCode != ''">
+            AND a.hospital_code = #{hospitalCode}
+        </if>
+        <if test="hosDrugId != null and hosDrugId != ''">
+            AND a.hos_drug_id = #{hosDrugId}
+        </if>
+        <if test="productName != null and productName != ''">
+            AND a.product_name LIKE CONCAT('%', #{productName}, '%')
+        </if>
+        GROUP BY a.hos_drug_id, a.product_name, b.drug_spec, b.pack_unit, b.manufacturer
+        )
+        SELECT
+        hos_drug_id,
+        product_name,
+        drug_spec,
+        pack_unit,
+        manufacturer,
+        total_in,
+        total_out,
+        (total_in - total_out) as stock_quantity,
+        latest_price,
+        ROUND((total_in - total_out) * latest_price, 2) as stock_amount
+        FROM stock_calc
+        WHERE (total_in - total_out) > 0
+        ORDER BY stock_quantity DESC
+    </select>
+
+    <!-- 查询出入库统计 -->
+    <select id="selectInoutStatistics" resultType="InoutStatVO">
+        SELECT
+        <!-- 入库统计 -->
+        COUNT(CASE WHEN io_type = 'IN' THEN 1 END) as inCount,
+        COALESCE(SUM(CASE WHEN io_type = 'IN' THEN in_pack_quantity END), 0) as inQuantity,
+        COALESCE(SUM(CASE WHEN io_type = 'IN' THEN in_pack_quantity * in_pack_price END), 0) as inAmount,
+        <!-- 出库统计 -->
+        COUNT(CASE WHEN io_type = 'OUT' THEN 1 END) as outCount,
+        COALESCE(SUM(CASE WHEN io_type = 'OUT' THEN out_pack_quantity END), 0) as outQuantity,
+        <!-- 供应商数量 -->
+        COUNT(DISTINCT CASE WHEN io_type = 'IN' THEN supplier_name END) as supplierCount
+        FROM gh_drug_inout_info
+        WHERE deleted = 0
+        <if test="startDate != null and startDate != ''">
+            AND out_in_date >= #{startDate}
+        </if>
+        <if test="endDate != null and endDate != ''">
+            AND out_in_date <= #{endDate}
+        </if>
+    </select>
+
+    <!-- 按月统计出入库金额 -->
+    <select id="selectMonthlyInoutAmount" resultType="map">
+        SELECT
+            SUBSTR(out_in_date, 5, 2) as month,
+            ROUND(SUM(CASE WHEN io_type = 'IN' THEN in_pack_quantity * in_pack_price ELSE 0 END), 2) as inAmount,
+            ROUND(SUM(CASE WHEN io_type = 'OUT' THEN out_pack_quantity *
+                (SELECT in_pack_price FROM gh_drug_inout_info
+                 WHERE hos_drug_id = a.hos_drug_id AND io_type = 'IN'
+                 ORDER BY out_in_date DESC LIMIT 1) ELSE 0 END), 2) as outAmount
+        FROM gh_drug_inout_info a
+        WHERE deleted = 0
+          AND out_in_date LIKE CONCAT(#{year}, '%')
+        GROUP BY SUBSTR(out_in_date, 5, 2)
+        ORDER BY month
+    </select>
+
+    <!-- 查询即将过期的药品 -->
+    <select id="selectExpiryWarning" resultType="map">
+        SELECT DISTINCT
+        a.hos_drug_id,
+        a.product_name,
+        a.batch_no,
+        a.production_date,
+        a.expiry_date,
+        a.supplier_name,
+        b.pack_unit,
+        <!-- 计算剩余库存 -->
+        (SELECT SUM(in_pack_quantity) - COALESCE(SUM(out_pack_quantity), 0)
+        FROM gh_drug_inout_info
+        WHERE hos_drug_id = a.hos_drug_id
+        AND batch_no = a.batch_no
+        AND deleted = 0) as stock_quantity,
+        <!-- 计算剩余天数 -->
+        DATEDIFF(STR_TO_DATE(a.expiry_date, '%Y%m%d'), CURDATE()) as days_remaining
+        FROM gh_drug_inout_info a
+        LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
+        WHERE a.deleted = 0
+        AND a.io_type = 'IN'
+        AND a.expiry_date IS NOT NULL
+        AND DATEDIFF(STR_TO_DATE(a.expiry_date, '%Y%m%d'), CURDATE()) <= #{days}
+        AND DATEDIFF(STR_TO_DATE(a.expiry_date, '%Y%m%d'), CURDATE()) >= 0
+        ORDER BY days_remaining
+    </select>
+
+    <!-- 供应商采购统计 -->
+    <select id="selectSupplierStats" resultType="map">
+        SELECT
+        supplier_name,
+        COUNT(DISTINCT hos_drug_id) as drugCount,
+        SUM(in_pack_quantity) as totalQuantity,
+        ROUND(SUM(in_pack_quantity * in_pack_price), 2) as totalAmount,
+        COUNT(*) as orderCount
+        FROM gh_drug_inout_info
+        WHERE deleted = 0
+        AND io_type = 'IN'
+        AND supplier_name IS NOT NULL
+        <if test="startDate != null and startDate != ''">
+            AND out_in_date >= #{startDate}
+        </if>
+        <if test="endDate != null and endDate != ''">
+            AND out_in_date <= #{endDate}
+        </if>
+        GROUP BY supplier_name
+        ORDER BY totalAmount DESC
+    </select>
+</mapper>
