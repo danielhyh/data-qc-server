@@ -5,6 +5,7 @@ import cn.iocoder.yudao.module.dataqc.controller.admin.importlog.vo.ImportLogPag
 import cn.iocoder.yudao.module.dataqc.controller.admin.importlog.vo.ImportLogSaveReqVO;
 import cn.iocoder.yudao.module.dataqc.dal.dataobject.importlog.ImportLogDO;
 import jakarta.validation.Valid;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -29,6 +30,11 @@ public interface ImportLogService {
      * @param updateReqVO 更新信息
      */
     void updateImportLog(@Valid ImportLogSaveReqVO updateReqVO);
+
+    @Transactional(rollbackFor = Exception.class)
+    void updateImportLogFail(Long logId, String errorMessage);
+
+    List<ImportLogDO> getImportLogList(String batchNo, String status);
 
     /**
      * 删除数据导入日志

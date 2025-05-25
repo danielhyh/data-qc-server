@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="cn.iocoder.yudao.module.dataqc.dal.mysql.drug.DrugInoutInfoMapper">
-    <!-- 查询库存汇总 -->
-    <select id="selectStockSummary" parameterType="DrugInoutInfoPageReqVO" resultType="map">
+
+    <!--
+    查询库存汇总
+    设计思路：使用CTE(公用表表达式)来简化复杂的库存计算逻辑
+    业务逻辑：通过入库数量减去出库数量计算当前库存，并获取最新入库价格
+    -->
+    <select id="selectStockSummary" parameterType="cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugInoutInfoPageReqVO" resultType="map">
         WITH stock_calc AS (
         SELECT
         a.hos_drug_id,
@@ -10,11 +15,11 @@
         b.drug_spec,
         b.pack_unit,
         b.manufacturer,
-        <!-- 计算入库总量 -->
+        -- 计算入库总量
         COALESCE(SUM(CASE WHEN a.io_type = 'IN' THEN a.in_pack_quantity ELSE 0 END), 0) as total_in,
-        <!-- 计算出库总量 -->
+        -- 计算出库总量
         COALESCE(SUM(CASE WHEN a.io_type = 'OUT' THEN a.out_pack_quantity ELSE 0 END), 0) as total_out,
-        <!-- 计算最新入库价格 -->
+        -- 计算最新入库价格，使用子查询获取最近一次入库的价格
         (SELECT in_pack_price FROM gh_drug_inout_info
         WHERE hos_drug_id = a.hos_drug_id AND io_type = 'IN' AND deleted = 0
         ORDER BY out_in_date DESC LIMIT 1) as latest_price
@@ -40,45 +45,55 @@
         manufacturer,
         total_in,
         total_out,
+        -- 库存数量 = 入库总量 - 出库总量
         (total_in - total_out) as stock_quantity,
         latest_price,
+        -- 库存金额 = 库存数量 × 最新价格
         ROUND((total_in - total_out) * latest_price, 2) as stock_amount
         FROM stock_calc
-        WHERE (total_in - total_out) > 0
+        WHERE (total_in - total_out) > 0  -- 只显示有库存的药品
         ORDER BY stock_quantity DESC
     </select>
 
-    <!-- 查询出入库统计 -->
-    <select id="selectInoutStatistics" resultType="InoutStatVO">
+    <!--
+    查询出入库统计
+    功能说明：统计指定时间范围内的出入库情况，包括数量、金额、供应商数量等关键指标
+    -->
+    <select id="selectInoutStatistics" resultType="cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.InoutStatVO">
         SELECT
-        <!-- 入库统计 -->
+        -- 入库统计数据
         COUNT(CASE WHEN io_type = 'IN' THEN 1 END) as inCount,
         COALESCE(SUM(CASE WHEN io_type = 'IN' THEN in_pack_quantity END), 0) as inQuantity,
         COALESCE(SUM(CASE WHEN io_type = 'IN' THEN in_pack_quantity * in_pack_price END), 0) as inAmount,
-        <!-- 出库统计 -->
+        -- 出库统计数据
         COUNT(CASE WHEN io_type = 'OUT' THEN 1 END) as outCount,
         COALESCE(SUM(CASE WHEN io_type = 'OUT' THEN out_pack_quantity END), 0) as outQuantity,
-        <!-- 供应商数量 -->
+        -- 供应商数量统计（去重计算）
         COUNT(DISTINCT CASE WHEN io_type = 'IN' THEN supplier_name END) as supplierCount
         FROM gh_drug_inout_info
         WHERE deleted = 0
         <if test="startDate != null and startDate != ''">
-            AND out_in_date >= #{startDate}
+            AND out_in_date &gt;= #{startDate}
         </if>
         <if test="endDate != null and endDate != ''">
-            AND out_in_date <= #{endDate}
+            AND out_in_date &lt;= #{endDate}
         </if>
     </select>
 
-    <!-- 按月统计出入库金额 -->
+    <!--
+    按月统计出入库金额
+    设计亮点：出库金额计算时使用最新入库价格，确保金额统计的准确性
+    -->
     <select id="selectMonthlyInoutAmount" resultType="map">
         SELECT
             SUBSTR(out_in_date, 5, 2) as month,
+            -- 入库金额：直接使用入库价格计算
             ROUND(SUM(CASE WHEN io_type = 'IN' THEN in_pack_quantity * in_pack_price ELSE 0 END), 2) as inAmount,
+            -- 出库金额：使用该药品最新的入库价格计算
             ROUND(SUM(CASE WHEN io_type = 'OUT' THEN out_pack_quantity *
-                (SELECT in_pack_price FROM gh_drug_inout_info
-                 WHERE hos_drug_id = a.hos_drug_id AND io_type = 'IN'
-                 ORDER BY out_in_date DESC LIMIT 1) ELSE 0 END), 2) as outAmount
+                                                     (SELECT in_pack_price FROM gh_drug_inout_info
+                                                      WHERE hos_drug_id = a.hos_drug_id AND io_type = 'IN'
+                                                      ORDER BY out_in_date DESC LIMIT 1) ELSE 0 END), 2) as outAmount
         FROM gh_drug_inout_info a
         WHERE deleted = 0
           AND out_in_date LIKE CONCAT(#{year}, '%')
@@ -86,53 +101,66 @@
         ORDER BY month
     </select>
 
-    <!-- 查询即将过期的药品 -->
+    <!--
+    查询即将过期的药品
+    业务价值：提前预警即将过期的药品，帮助医疗机构及时处理，减少损失
+    查询逻辑：根据批次号计算剩余库存，根据有效期计算剩余天数
+    -->
     <select id="selectExpiryWarning" resultType="map">
         SELECT DISTINCT
-        a.hos_drug_id,
-        a.product_name,
-        a.batch_no,
-        a.production_date,
-        a.expiry_date,
-        a.supplier_name,
-        b.pack_unit,
-        <!-- 计算剩余库存 -->
-        (SELECT SUM(in_pack_quantity) - COALESCE(SUM(out_pack_quantity), 0)
-        FROM gh_drug_inout_info
-        WHERE hos_drug_id = a.hos_drug_id
-        AND batch_no = a.batch_no
-        AND deleted = 0) as stock_quantity,
-        <!-- 计算剩余天数 -->
-        DATEDIFF(STR_TO_DATE(a.expiry_date, '%Y%m%d'), CURDATE()) as days_remaining
+            a.hos_drug_id,
+            a.product_name,
+            a.batch_no,
+            a.production_date,
+            a.expiry_date,
+            a.supplier_name,
+            b.pack_unit,
+            -- 计算该批次的剩余库存
+            (SELECT COALESCE(SUM(in_pack_quantity), 0) - COALESCE(SUM(out_pack_quantity), 0)
+             FROM gh_drug_inout_info
+             WHERE hos_drug_id = a.hos_drug_id
+               AND batch_no = a.batch_no
+               AND deleted = 0) as stock_quantity,
+            -- 计算距离过期的剩余天数
+            DATEDIFF(STR_TO_DATE(a.expiry_date, '%Y%m%d'), CURDATE()) as days_remaining
         FROM gh_drug_inout_info a
-        LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
+                 LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
         WHERE a.deleted = 0
-        AND a.io_type = 'IN'
-        AND a.expiry_date IS NOT NULL
-        AND DATEDIFF(STR_TO_DATE(a.expiry_date, '%Y%m%d'), CURDATE()) <= #{days}
-        AND DATEDIFF(STR_TO_DATE(a.expiry_date, '%Y%m%d'), CURDATE()) >= 0
+          AND a.io_type = 'IN'  -- 只关注入库记录，因为过期信息主要来自入库
+          AND a.expiry_date IS NOT NULL
+          AND DATEDIFF(STR_TO_DATE(a.expiry_date, '%Y%m%d'), CURDATE()) &lt;= #{days}
+          AND DATEDIFF(STR_TO_DATE(a.expiry_date, '%Y%m%d'), CURDATE()) &gt;= 0  -- 排除已过期的
         ORDER BY days_remaining
     </select>
 
-    <!-- 供应商采购统计 -->
+    <!--
+    供应商采购统计
+    分析维度：按供应商统计采购的药品种类、数量、金额、订单数等关键指标
+    应用场景：供应商绩效评估、采购策略制定
+    -->
     <select id="selectSupplierStats" resultType="map">
         SELECT
         supplier_name,
+        -- 采购药品种类数（去重统计）
         COUNT(DISTINCT hos_drug_id) as drugCount,
+        -- 采购总数量
         SUM(in_pack_quantity) as totalQuantity,
+        -- 采购总金额
         ROUND(SUM(in_pack_quantity * in_pack_price), 2) as totalAmount,
+        -- 采购订单数
         COUNT(*) as orderCount
         FROM gh_drug_inout_info
         WHERE deleted = 0
-        AND io_type = 'IN'
+        AND io_type = 'IN'  -- 只统计入库（采购）数据
         AND supplier_name IS NOT NULL
         <if test="startDate != null and startDate != ''">
-            AND out_in_date >= #{startDate}
+            AND out_in_date &gt;= #{startDate}
         </if>
         <if test="endDate != null and endDate != ''">
-            AND out_in_date <= #{endDate}
+            AND out_in_date &lt;= #{endDate}
         </if>
         GROUP BY supplier_name
-        ORDER BY totalAmount DESC
+        ORDER BY totalAmount DESC  -- 按采购金额降序排列
     </select>
+
 </mapper>

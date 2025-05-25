@@ -6,6 +6,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Schema(description = "管理后台 - 批量导入任务 Response VO")
 @Data
@@ -71,5 +72,9 @@ public class BatchImportTaskRespVO {
     @Schema(description = "消息", requiredMode = Schema.RequiredMode.REQUIRED)
     @ExcelProperty("消息")
     private String message;
+
+    @Schema(description = "详情")
+    @ExcelProperty("详情")
+    private List<BatchImportTaskDetailRespVO> details;
 
 }

@@ -2,7 +2,7 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="cn.iocoder.yudao.module.dataqc.dal.mysql.drug.HosResourceInfoMapper">
     <!-- 查询最新季度数据 -->
-    <select id="selectLatestByHospital" resultType="HosResourceInfoDO">
+    <select id="selectLatestByHospital" resultType="cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.HosResourceInfoDO">
         SELECT * FROM gh_hos_resource_info
         WHERE hospital_code = #{hospitalCode}
           AND deleted = 0

@@ -5,6 +5,8 @@ import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.HosResourceInfoPa
 import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.HosResourceInfoSaveReqVO;
 import cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.HosResourceInfoDO;
 import jakarta.validation.Valid;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -14,6 +16,9 @@ import java.util.List;
  * @author 管理员
  */
 public interface HosResourceInfoService {
+
+    @Transactional(rollbackFor = Exception.class)
+    String importResourceData(MultipartFile file, boolean updateSupport) throws Exception;
 
     /**
      * 创建医疗机构资源信息

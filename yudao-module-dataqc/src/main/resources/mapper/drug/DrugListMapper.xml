@@ -34,7 +34,7 @@
         </resultMap>
 
         <!-- 根据YPID批量查询 -->
-        <select id="selectByYpidList" resultType="DrugListDO">
+        <select id="selectByYpidList" resultType="cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.DrugListDO">
             SELECT * FROM gh_drug_list
             WHERE deleted = 0
             AND ypid IN

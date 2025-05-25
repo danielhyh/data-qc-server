@@ -2,7 +2,7 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="cn.iocoder.yudao.module.dataqc.dal.mysql.drug.DrugUseInfoMapper">
     <!-- 获取使用统计 -->
-    <select id="selectUseStatistics" parameterType="DrugUseInfoPageReqVO" resultType="map">
+    <select id="selectUseStatistics" parameterType="cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugUseInfoPageReqVO" resultType="map">
         SELECT
         COUNT(*) as totalCount,
         SUM(sell_pack_quantity) as totalQuantity,
@@ -16,10 +16,10 @@
             AND hospital_code = #{hospitalCode}
         </if>
         <if test="beginDate != null and beginDate != ''">
-            AND sell_date >= #{beginDate}
+            AND sell_date &gt; #{beginDate}
         </if>
         <if test="endDate != null and endDate != ''">
-            AND sell_date <= #{endDate}
+            AND sell_date &lt; #{endDate}
         </if>
     </select>
 
@@ -39,10 +39,10 @@
         LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
         WHERE a.deleted = 0
         <if test="startDate != null and startDate != ''">
-            AND a.sell_date >= #{startDate}
+            AND a.sell_date &gt; #{startDate}
         </if>
         <if test="endDate != null and endDate != ''">
-            AND a.sell_date <= #{endDate}
+            AND a.sell_date &lt; #{endDate}
         </if>
         GROUP BY a.department_code, a.department_name
         ORDER BY totalAmount DESC
@@ -64,10 +64,10 @@
         LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
         WHERE a.deleted = 0
         <if test="startDate != null and startDate != ''">
-            AND a.sell_date >= #{startDate}
+            AND a.sell_date &gt; #{startDate}
         </if>
         <if test="endDate != null and endDate != ''">
-            AND a.sell_date <= #{endDate}
+            AND a.sell_date &lt; #{endDate}
         </if>
         GROUP BY a.hos_drug_id, a.product_name, b.drug_spec, b.manufacturer, b.base_flag
         ORDER BY totalAmount DESC
@@ -96,10 +96,10 @@
         LEFT JOIN gh_drug_list b ON a.hos_drug_id = b.hos_drug_id
         WHERE a.deleted = 0
         <if test="startDate != null and startDate != ''">
-            AND a.sell_date >= #{startDate}
+            AND a.sell_date &gt; #{startDate}
         </if>
         <if test="endDate != null and endDate != ''">
-            AND a.sell_date <= #{endDate}
+            AND a.sell_date &lt; #{endDate}
         </if>
     </select>
 
@@ -119,10 +119,10 @@
         FROM gh_drug_use_info
         WHERE deleted = 0
         <if test="startDate != null and startDate != ''">
-            AND sell_date >= #{startDate}
+            AND sell_date &gt; #{startDate}
         </if>
         <if test="endDate != null and endDate != ''">
-            AND sell_date <= #{endDate}
+            AND sell_date &lt; #{endDate}
         </if>
         GROUP BY patient_type
         ORDER BY totalAmount DESC

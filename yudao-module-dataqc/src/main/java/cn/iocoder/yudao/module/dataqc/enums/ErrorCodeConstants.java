@@ -27,4 +27,8 @@ public interface ErrorCodeConstants {
     ErrorCode IMPORT_DATA_CANNOT_BE_EMPTY = new ErrorCode(1_002_000_010, "导入数据不能为空");
     // 导入失败
     ErrorCode IMPORT_FAILED = new ErrorCode(1_002_000_011, "导入失败");
+    // 批量导入任务不存在
+    ErrorCode BATCH_IMPORT_TASK_NOT_EXISTS = new ErrorCode(1_002_000_012, "批量导入任务不存在");
+    // 未找到失败的导入
+    ErrorCode NO_FAILED_IMPORT_FOUND = new ErrorCode(1_002_000_013, "未找到失败的导入");
 }

@@ -1,16 +1,21 @@
 package cn.iocoder.yudao.module.dataqc.service.importlog;
 
 import cn.hutool.core.collection.CollUtil;
+import cn.hutool.core.util.StrUtil;
 import cn.iocoder.yudao.framework.common.pojo.PageResult;
 import cn.iocoder.yudao.framework.common.util.object.BeanUtils;
 import cn.iocoder.yudao.module.dataqc.controller.admin.importlog.vo.ImportLogPageReqVO;
 import cn.iocoder.yudao.module.dataqc.controller.admin.importlog.vo.ImportLogSaveReqVO;
 import cn.iocoder.yudao.module.dataqc.dal.dataobject.importlog.ImportLogDO;
 import cn.iocoder.yudao.module.dataqc.dal.mysql.importlog.ImportLogMapper;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.validation.annotation.Validated;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 import static cn.iocoder.yudao.framework.common.exception.util.ServiceExceptionUtil.exception;
@@ -23,27 +28,82 @@ import static cn.iocoder.yudao.module.dataqc.enums.ErrorCodeConstants.IMPORT_LOG
  */
 @Service
 @Validated
+@Slf4j
 public class ImportLogServiceImpl implements ImportLogService {
 
     @Resource
     private ImportLogMapper importLogMapper;
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Long createImportLog(ImportLogSaveReqVO createReqVO) {
-        // 插入
+        // 创建导入日志记录
         ImportLogDO importLog = BeanUtils.toBean(createReqVO, ImportLogDO.class);
+        importLog.setStatus("PROCESSING"); // 设置初始状态为处理中
+        importLog.setStartTime(LocalDateTime.now());
+        importLog.setCreateTime(LocalDateTime.now());
+
         importLogMapper.insert(importLog);
-        // 返回
+
+        log.info("创建导入日志记录，批次号：{}，文件名：{}",
+                importLog.getBatchNo(), importLog.getFileName());
+
         return importLog.getId();
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void updateImportLog(ImportLogSaveReqVO updateReqVO) {
-        // 校验存在
-        validateImportLogExists(updateReqVO.getId());
-        // 更新
+        if (updateReqVO.getId() == null) {
+            log.warn("更新导入日志失败：ID不能为空");
+            return;
+        }
+
         ImportLogDO updateObj = BeanUtils.toBean(updateReqVO, ImportLogDO.class);
+        updateObj.setEndTime(LocalDateTime.now());
+
+        // 根据成功率判断最终状态
+        if (updateReqVO.getFailRows() != null && updateReqVO.getSuccessRows() != null) {
+            if (updateReqVO.getFailRows() == 0) {
+                updateObj.setStatus("SUCCESS"); // 全部成功
+            } else if (updateReqVO.getSuccessRows() > 0) {
+                updateObj.setStatus("PARTIAL_SUCCESS"); // 部分成功
+            } else {
+                updateObj.setStatus("FAIL"); // 全部失败
+            }
+        }
+
         importLogMapper.updateById(updateObj);
+
+        log.info("更新导入日志，ID：{}，状态：{}", updateReqVO.getId(), updateObj.getStatus());
+    }
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateImportLogFail(Long logId, String errorMessage) {
+        if (logId == null) {
+            log.warn("更新导入日志失败状态失败：ID不能为空");
+            return;
+        }
+
+        ImportLogDO updateObj = new ImportLogDO();
+        updateObj.setId(logId);
+        updateObj.setStatus("FAIL");
+        updateObj.setErrorMsg(errorMessage);
+        updateObj.setEndTime(LocalDateTime.now());
+
+        importLogMapper.updateById(updateObj);
+
+        log.error("导入失败，日志ID：{}，错误信息：{}", logId, errorMessage);
+    }
+    @Override
+    public List<ImportLogDO> getImportLogList(String batchNo, String status) {
+        LambdaQueryWrapper<ImportLogDO> wrapper = new LambdaQueryWrapper<>();
+
+        wrapper.eq(StrUtil.isNotEmpty(batchNo), ImportLogDO::getBatchNo, batchNo);
+        wrapper.eq(StrUtil.isNotEmpty(status), ImportLogDO::getStatus, status);
+        wrapper.orderByDesc(ImportLogDO::getCreateTime);
+
+        return importLogMapper.selectList(wrapper);
     }
 
     @Override

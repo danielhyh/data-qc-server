@@ -76,4 +76,7 @@ public class BatchImportTaskDetailRespVO {
     @ExcelProperty("创建时间")
     private LocalDateTime createTime;
 
+    private String fileTypeDisplay;
+    private String statusDisplay;
+
 }
