@@ -85,5 +85,9 @@ public interface DrugUseInfoService {
      * 获取药品使用排名
      */
     List<Map<String, Object>> getDrugUseRanking(String startDate, String endDate);
+    /**
+     * 基础药品分析
+     */
+    Map<String, Object> getBaseDrugAnalysis(String startDate, String endDate);
 
 }

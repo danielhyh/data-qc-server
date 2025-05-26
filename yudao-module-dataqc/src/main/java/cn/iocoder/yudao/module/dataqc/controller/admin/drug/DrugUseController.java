@@ -7,8 +7,8 @@ import cn.iocoder.yudao.framework.common.pojo.PageResult;
 import cn.iocoder.yudao.framework.common.util.object.BeanUtils;
 import cn.iocoder.yudao.framework.excel.core.util.ExcelUtils;
 import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugUseInfoPageReqVO;
-import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugUseInfoSaveReqVO;
 import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugUseInfoRespVO;
+import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugUseInfoSaveReqVO;
 import cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.DrugUseInfoDO;
 import cn.iocoder.yudao.module.dataqc.service.drug.DrugUseInfoService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -238,10 +238,8 @@ public class DrugUseController {
     public CommonResult<Map<String, Object>> getBaseDrugAnalysis(
             @RequestParam("startDate") String startDate,
             @RequestParam("endDate") String endDate) {
-        // 这里需要在Service中实现对应方法
-        // Map<String, Object> result = drugUseInfoService.getBaseDrugAnalysis(startDate, endDate);
-        // return success(result);
-        return success(Map.of()); // 临时返回空Map
+        Map<String, Object> result = drugUseInfoService.getBaseDrugAnalysis(startDate, endDate);
+        return success(result);
     }
 
     /**

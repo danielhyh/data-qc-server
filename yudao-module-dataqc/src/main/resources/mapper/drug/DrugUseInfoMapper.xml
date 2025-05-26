@@ -127,4 +127,21 @@
         GROUP BY patient_type
         ORDER BY totalAmount DESC
     </select>
+    <!-- 查询基药总金额 -->
+    <select id="selectBaseDrugAmount" resultType="java.math.BigDecimal">
+        SELECT IFNULL(SUM(du.sell_pack_quantity * du.sell_pack_price), 0) as amount
+        FROM gh_drug_use_info du
+                 INNER JOIN gh_drug_list dl ON du.hos_drug_id = dl.hos_drug_id
+        WHERE du.sell_date BETWEEN #{startDate} AND #{endDate}
+          AND dl.base_flag = '1'
+    </select>
+
+    <!-- 查询非基药总金额 -->
+    <select id="selectNonBaseDrugAmount" resultType="java.math.BigDecimal">
+        SELECT IFNULL(SUM(du.sell_pack_quantity * du.sell_pack_price), 0) as amount
+        FROM gh_drug_use_info du
+                 INNER JOIN gh_drug_list dl ON du.hos_drug_id = dl.hos_drug_id
+        WHERE du.sell_date BETWEEN #{startDate} AND #{endDate}
+          AND (dl.base_flag = '0' OR dl.base_flag IS NULL)
+    </select>
 </mapper>

@@ -8,6 +8,7 @@ import cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.DrugUseInfoDO;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
@@ -76,4 +77,13 @@ public interface DrugUseInfoMapper extends BaseMapperX<DrugUseInfoDO> {
     List<Map<String, Object>> selectPatientTypeStats(@Param("startDate") String startDate,
                                                      @Param("endDate") String endDate);
 
+    /**
+     * 查询基药总金额
+     */
+    BigDecimal selectBaseDrugAmount(@Param("startDate") String startDate, @Param("endDate") String endDate);
+
+    /**
+     * 查询非基药总金额
+     */
+    BigDecimal selectNonBaseDrugAmount(@Param("startDate") String startDate, @Param("endDate") String endDate);
 }

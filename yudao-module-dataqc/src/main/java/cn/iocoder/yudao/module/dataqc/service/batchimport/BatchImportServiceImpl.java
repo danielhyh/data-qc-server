@@ -18,11 +18,9 @@ import cn.iocoder.yudao.module.dataqc.service.drug.DrugListService;
 import cn.iocoder.yudao.module.dataqc.service.drug.DrugUseInfoService;
 import cn.iocoder.yudao.module.dataqc.service.drug.HosResourceInfoService;
 import cn.iocoder.yudao.module.dataqc.util.CustomMultipartFile;
-import cn.iocoder.yudao.module.infra.api.file.FileApi;
 import com.alibaba.fastjson.JSON;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import jakarta.annotation.Resource;
-import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -30,7 +28,6 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -75,8 +72,8 @@ public class BatchImportServiceImpl implements IBatchImportService {
     private DrugInoutInfoService inoutService;
     @Resource
     private DrugUseInfoService useService;
-    @Resource
-    private FileApi fileApi;
+    @Value("${dataqc.temp-dir}")
+    private String uploadPath;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -291,15 +288,14 @@ public class BatchImportServiceImpl implements IBatchImportService {
      */
     private String saveAndUnzipFile(MultipartFile file, String taskNo) throws Exception {
         // 创建临时目录
-        String zipPath = fileApi.createFile(file.getBytes());
-        String tempPath = zipPath + "/temp/" + taskNo;
+        String tempPath = uploadPath + "/temp/" + taskNo;
         File tempDir = new File(tempPath);
         if (!tempDir.exists()) {
             tempDir.mkdirs();
         }
 
         // 保存压缩包
-//        String zipPath = tempPath + "/" + file.getOriginalFilename();
+        String zipPath = tempPath + "/" + file.getOriginalFilename();
         File zipFile = new File(zipPath);
         file.transferTo(zipFile);
 

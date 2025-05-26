@@ -23,6 +23,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -211,6 +212,21 @@ public class DrugUseInfoServiceImpl implements DrugUseInfoService {
     public List<Map<String, Object>> getDrugUseRanking(String startDate, String endDate) {
         // 药品使用排名
         return drugUseInfoMapper.selectDrugUseRanking(startDate, endDate, 20); // 取前20名
+    }
+
+    @Override
+    public Map<String, Object> getBaseDrugAnalysis(String startDate, String endDate) {
+        Map<String, Object> result = new HashMap<>();
+
+        // 查询基药总金额
+        BigDecimal baseDrugAmount = drugUseInfoMapper.selectBaseDrugAmount(startDate, endDate);
+        result.put("baseDrugAmount", baseDrugAmount != null ? baseDrugAmount : BigDecimal.ZERO);
+
+        // 查询非基药总金额
+        BigDecimal nonBaseDrugAmount = drugUseInfoMapper.selectNonBaseDrugAmount(startDate, endDate);
+        result.put("nonBaseDrugAmount", nonBaseDrugAmount != null ? nonBaseDrugAmount : BigDecimal.ZERO);
+
+        return result;
     }
 
     // 私有辅助方法
