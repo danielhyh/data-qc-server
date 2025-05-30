@@ -20,6 +20,12 @@ public class DrugListPageReqVO extends PageParam {
     @Schema(description = "系统编码")
     private String domainCode;
 
+    @Schema(description = "省级行政区划代码") //+
+    private String provinceCode;
+
+    @Schema(description = "医疗机构名称", requiredMode = Schema.RequiredMode.REQUIRED)
+    private String hospitalName;
+
     @Schema(description = "组织机构代码")
     private String organizationCode;
 

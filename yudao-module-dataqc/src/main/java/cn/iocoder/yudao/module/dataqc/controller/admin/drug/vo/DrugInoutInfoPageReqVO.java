@@ -20,6 +20,12 @@ public class DrugInoutInfoPageReqVO extends PageParam {
     @Schema(description = "系统编码")
     private String domainCode;
 
+    @Schema(description = "省级行政区划代码") //+
+    private String provinceCode;
+
+    @Schema(description = "入库总金额(元)", requiredMode = Schema.RequiredMode.REQUIRED, example = "26800")
+    private BigDecimal inTotalPrice;
+
     @Schema(description = "组织机构代码")
     private String organizationCode;
 

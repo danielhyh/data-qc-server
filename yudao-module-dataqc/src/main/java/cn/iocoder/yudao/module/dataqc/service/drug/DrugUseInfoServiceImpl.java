@@ -1,5 +1,6 @@
 package cn.iocoder.yudao.module.dataqc.service.drug;
 
+import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.util.RandomUtil;
@@ -8,10 +9,16 @@ import cn.iocoder.yudao.framework.common.pojo.PageResult;
 import cn.iocoder.yudao.framework.common.util.object.BeanUtils;
 import cn.iocoder.yudao.framework.excel.core.util.ExcelUtils;
 import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugUseInfoPageReqVO;
+import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugUseInfoRespVO;
 import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugUseInfoSaveReqVO;
+import cn.iocoder.yudao.module.dataqc.controller.admin.importlog.vo.ImportLogSaveReqVO;
 import cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.DrugListDO;
 import cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.DrugUseInfoDO;
 import cn.iocoder.yudao.module.dataqc.dal.mysql.drug.DrugUseInfoMapper;
+import cn.iocoder.yudao.module.dataqc.service.importlog.ImportLogService;
+import com.alibaba.excel.EasyExcel;
+import com.alibaba.excel.context.AnalysisContext;
+import com.alibaba.excel.event.AnalysisEventListener;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -46,6 +53,8 @@ public class DrugUseInfoServiceImpl implements DrugUseInfoService {
     private DrugUseInfoMapper drugUseInfoMapper;
     @Resource
     private DrugListService drugListService;
+    @Resource
+    private ImportLogService importLogService;
 
     @Override
     public Long createDrugUseInfo(DrugUseInfoSaveReqVO createReqVO) {
@@ -134,8 +143,26 @@ public class DrugUseInfoServiceImpl implements DrugUseInfoService {
     public String importUseData(MultipartFile file, boolean updateSupport) throws Exception {
         String batchNo = generateBatchNo();
 
+        // 记录导入日志 - 修复状态设置问题
+        ImportLogSaveReqVO importLogSaveReqVO = new ImportLogSaveReqVO()
+                .setBatchNo(batchNo)
+                .setFileName(file.getOriginalFilename())
+                .setFileType("DRUG_USE_INFO")
+                .setTableName("gh_drug_use_info")
+                .setStatus("PROCESSING"); // 明确设置状态
+
+        Long logId = importLogService.createImportLog(importLogSaveReqVO);
+
         try {
-            List<DrugUseInfoDO> dataList = ExcelUtils.read(file, DrugUseInfoDO.class);
+            // 安全读取Excel数据
+            List<DrugUseInfoRespVO> dataList = null;
+            try {
+                dataList = ExcelUtils.read(file, DrugUseInfoRespVO.class, 3);
+            } catch (Exception e) {
+                log.error("Excel读取失败：{}", e.getMessage());
+                // 尝试安全模式读取
+//                dataList = safeReadUseData(file);
+            }
 
             if (CollUtil.isEmpty(dataList)) {
                 throw exception(IMPORT_DATA_CANNOT_BE_EMPTY);
@@ -145,41 +172,52 @@ public class DrugUseInfoServiceImpl implements DrugUseInfoService {
             List<String> errorMsgs = new ArrayList<>();
 
             for (int i = 0; i < dataList.size(); i++) {
-                DrugUseInfoDO useInfo = dataList.get(i);
+                DrugUseInfoRespVO sourceUseInfo = dataList.get(i);
+                DrugUseInfoDO useInfo = BeanUtil.copyProperties(sourceUseInfo, DrugUseInfoDO.class);
 
-                // 数据校验
-                String errorMsg = validateUseData(useInfo, i + 1);
-                if (StrUtil.isNotEmpty(errorMsg)) {
-                    errorMsgs.add(errorMsg);
-                    continue;
+                try {
+//                    // 数据校验
+//                    String errorMsg = validateUseData(useInfo, i + 1);
+//                    if (StrUtil.isNotEmpty(errorMsg)) {
+//                        errorMsgs.add(errorMsg);
+//                        continue;
+//                    }
+
+                    // 验证药品是否存在 - 这是业务规则校验的重要例子
+                    DrugListDO drug = drugListService.selectByHosDrugId(useInfo.getHosDrugId());
+                    if (drug == null) {
+                        errorMsgs.add("第" + (i + 1) + "行：药品编码[" + useInfo.getHosDrugId() + "]不存在");
+                        continue;
+                    }
+
+                    // 自动填充关联数据
+                    useInfo.setYpid(drug.getYpid());
+                    useInfo.setPrDrugId(drug.getPrDrugId());
+                    useInfo.setProductName(drug.getProductName());
+
+                    // 计算制剂单位的数量和价格 - 添加空值检查
+                    if (drug.getDrugFactor() != null && drug.getDrugFactor().compareTo(BigDecimal.ZERO) > 0) {
+                        if (useInfo.getSellPackQuantity() != null) {
+                            useInfo.setSellDosageQuantity(
+                                    useInfo.getSellPackQuantity() * drug.getDrugFactor().longValue());
+                        }
+                        if (useInfo.getSellPackPrice() != null) {
+                            useInfo.setSellDosagePrice(
+                                    useInfo.getSellPackPrice().divide(drug.getDrugFactor(), 2, BigDecimal.ROUND_HALF_UP));
+                        }
+                    }
+
+                    // 设置批次信息
+                    useInfo.setImportBatchNo(batchNo);
+                    useInfo.setImportTime(LocalDateTime.now());
+                    useInfo.setUploadDate(DateUtil.format(DateUtil.date(), "yyyyMMdd"));
+
+                    insertList.add(useInfo);
+
+                } catch (Exception e) {
+                    log.error("处理第{}行使用数据失败：{}", i + 1, e.getMessage());
+                    errorMsgs.add("第" + (i + 1) + "行：处理失败 - " + e.getMessage());
                 }
-
-                // 验证药品是否存在 - 这是业务规则校验的重要例子
-                DrugListDO drug = drugListService.selectByHosDrugId(useInfo.getHosDrugId());
-                if (drug == null) {
-                    errorMsgs.add("第" + (i + 1) + "行：药品编码[" + useInfo.getHosDrugId() + "]不存在");
-                    continue;
-                }
-
-                // 自动填充关联数据
-                useInfo.setYpid(drug.getYpid());
-                useInfo.setPrDrugId(drug.getPrDrugId());
-                useInfo.setProductName(drug.getProductName());
-
-                // 计算制剂单位的数量和价格
-                if (drug.getDrugFactor() != null && drug.getDrugFactor().compareTo(BigDecimal.ZERO) > 0) {
-                    useInfo.setSellDosageQuantity(
-                            useInfo.getSellPackQuantity() * drug.getDrugFactor().longValue());
-                    useInfo.setSellDosagePrice(
-                            useInfo.getSellPackPrice().divide(drug.getDrugFactor(), 2, BigDecimal.ROUND_HALF_UP));
-                }
-
-                // 设置批次信息
-                useInfo.setImportBatchNo(batchNo);
-                useInfo.setImportTime(LocalDateTime.now());
-                useInfo.setUploadDate(DateUtil.format(DateUtil.date(), "yyyyMMdd"));
-
-                insertList.add(useInfo);
             }
 
             // 批量保存
@@ -187,13 +225,54 @@ public class DrugUseInfoServiceImpl implements DrugUseInfoService {
                 saveBatch(insertList);
             }
 
+            // 更新导入日志
+            ImportLogSaveReqVO updateImportLogVO = new ImportLogSaveReqVO()
+                    .setId(logId)
+                    .setTotalRows(dataList.size())
+                    .setSuccessRows(insertList.size())
+                    .setFailRows(errorMsgs.size())
+                    .setStatus(errorMsgs.isEmpty() ? "SUCCESS" : "PARTIAL_SUCCESS")
+                    .setErrorMsg(StrUtil.join("\n", errorMsgs));
+            importLogService.updateImportLog(updateImportLogVO);
+
             return String.format("导入成功！总数：%d，成功：%d，失败：%d",
                     dataList.size(), insertList.size(), errorMsgs.size());
 
         } catch (Exception e) {
             log.error("导入药品使用数据失败", e);
+            importLogService.updateImportLogFail(logId, e.getMessage());
             throw exception(IMPORT_FAILED, e.getMessage());
         }
+    }
+
+    /**
+     * 安全读取使用数据
+     */
+    private List<DrugUseInfoDO> safeReadUseData(MultipartFile file) {
+        List<DrugUseInfoDO> result = new ArrayList<>();
+        try {
+            EasyExcel.read(file.getInputStream(), DrugUseInfoDO.class, new AnalysisEventListener<DrugUseInfoDO>() {
+                @Override
+                public void invoke(DrugUseInfoDO data, AnalysisContext context) {
+                    result.add(data);
+                }
+
+                @Override
+                public void doAfterAllAnalysed(AnalysisContext context) {
+                    log.info("安全模式读取使用数据完成，共{}行", result.size());
+                }
+
+                @Override
+                public void onException(Exception exception, AnalysisContext context) {
+                    log.warn("第{}行读取异常，跳过：{}", context.readRowHolder().getRowIndex(), exception.getMessage());
+                }
+            }).sheet().doRead();
+
+        } catch (Exception e) {
+            log.error("安全模式读取使用数据失败", e);
+            throw new RuntimeException("Excel文件读取失败", e);
+        }
+        return result;
     }
 
     @Override

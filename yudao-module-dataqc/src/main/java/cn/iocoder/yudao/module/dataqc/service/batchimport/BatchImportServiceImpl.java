@@ -357,7 +357,6 @@ public class BatchImportServiceImpl implements IBatchImportService {
         updateDetailStatus(task.getId(), fileType, 1, null);
 
         ImportResult result = new ImportResult();
-        String importBatchNo = task.getTaskNo() + "_" + fileType;
 
         try {
             // 使用我们自定义的CustomMultipartFile，而不是MockMultipartFile

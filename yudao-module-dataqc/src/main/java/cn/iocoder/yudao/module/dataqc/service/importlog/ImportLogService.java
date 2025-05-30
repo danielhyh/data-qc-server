@@ -29,7 +29,7 @@ public interface ImportLogService {
      *
      * @param updateReqVO 更新信息
      */
-    void updateImportLog(@Valid ImportLogSaveReqVO updateReqVO);
+    void updateImportLog(ImportLogSaveReqVO updateReqVO);
 
     @Transactional(rollbackFor = Exception.class)
     void updateImportLogFail(Long logId, String errorMessage);

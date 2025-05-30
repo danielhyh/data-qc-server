@@ -17,6 +17,12 @@ public class HosResourceInfoSaveReqVO {
     @NotEmpty(message = "系统编码不能为空")
     private String domainCode;
 
+    @Schema(description = "省级行政区划代码")
+    private String provinceCode;
+
+    @Schema(description = "年度药品总收入（元）")
+    private BigDecimal annualDrugIncome;
+
     @Schema(description = "组织机构代码", requiredMode = Schema.RequiredMode.REQUIRED)
     @NotEmpty(message = "组织机构代码不能为空")
     private String organizationCode;

@@ -1,9 +1,12 @@
 package cn.iocoder.yudao.module.dataqc.dal.dataobject.drug;
 
 import cn.iocoder.yudao.framework.mybatis.core.dataobject.BaseDO;
+import cn.iocoder.yudao.module.dataqc.util.ExcelDataConverter;
+import com.alibaba.excel.annotation.ExcelProperty;
 import com.baomidou.mybatisplus.annotation.KeySequence;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.*;
 
 import java.math.BigDecimal;
@@ -37,6 +40,11 @@ public class DrugInoutInfoDO extends BaseDO {
      * 系统编码
      */
     private String domainCode;
+    @Schema(description = "省级行政区划代码") //+
+    private String provinceCode;
+
+    @Schema(description = "入库总金额(元)", requiredMode = Schema.RequiredMode.REQUIRED, example = "26800")
+    private BigDecimal inTotalPrice;
     /**
      * 组织机构代码
      */
@@ -77,29 +85,19 @@ public class DrugInoutInfoDO extends BaseDO {
      * 出入库类型(IN-入库,OUT-出库)
      */
     private String ioType;
-    /**
-     * 入库数量(最小销售包装单位)
-     */
+    @ExcelProperty(value = "入库数量(最小销售包装单位)", converter = ExcelDataConverter.SafeLongConverter.class)
     private Long inPackQuantity;
-    /**
-     * 入库数量(最小制剂单位)
-     */
+
+    @ExcelProperty(value = "入库数量(最小制剂单位)", converter = ExcelDataConverter.SafeLongConverter.class)
     private Long inDosageQuantity;
-    /**
-     * 入库价格(最小销售包装单位)
-     */
+    @ExcelProperty(value = "入库价格(最小销售包装单位)", converter = ExcelDataConverter.SafeBigDecimalConverter.class)
     private BigDecimal inPackPrice;
-    /**
-     * 入库价格(最小制剂单位)
-     */
+    @ExcelProperty(value = "入库价格(最小制剂单位)", converter = ExcelDataConverter.SafeBigDecimalConverter.class)
     private BigDecimal inDosagePrice;
-    /**
-     * 出库数量(最小销售包装单位)
-     */
+    @ExcelProperty(value = "出库数量(最小销售包装单位)", converter = ExcelDataConverter.SafeLongConverter.class)
     private Long outPackQuantity;
-    /**
-     * 出库数量(最小制剂单位)
-     */
+
+    @ExcelProperty(value = "出库数量(最小制剂单位)", converter = ExcelDataConverter.SafeLongConverter.class)
     private Long outDosageQuantity;
     /**
      * 供应商代码

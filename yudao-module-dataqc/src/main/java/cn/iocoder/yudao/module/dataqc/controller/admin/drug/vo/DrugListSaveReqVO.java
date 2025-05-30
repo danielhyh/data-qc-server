@@ -23,6 +23,12 @@ public class DrugListSaveReqVO {
     @NotEmpty(message = "系统编码不能为空")
     private String domainCode;
 
+    @Schema(description = "省级行政区划代码") //+
+    private String provinceCode;
+
+    @Schema(description = "医疗机构名称", requiredMode = Schema.RequiredMode.REQUIRED)
+    private String hospitalName;
+
     @Schema(description = "组织机构代码", requiredMode = Schema.RequiredMode.REQUIRED)
     @NotEmpty(message = "组织机构代码不能为空")
     private String organizationCode;

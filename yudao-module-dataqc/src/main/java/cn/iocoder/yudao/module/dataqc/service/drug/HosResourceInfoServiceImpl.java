@@ -1,5 +1,6 @@
 package cn.iocoder.yudao.module.dataqc.service.drug;
 
+import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.util.RandomUtil;
@@ -8,9 +9,12 @@ import cn.iocoder.yudao.framework.common.pojo.PageResult;
 import cn.iocoder.yudao.framework.common.util.object.BeanUtils;
 import cn.iocoder.yudao.framework.excel.core.util.ExcelUtils;
 import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.HosResourceInfoPageReqVO;
+import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.HosResourceInfoRespVO;
 import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.HosResourceInfoSaveReqVO;
+import cn.iocoder.yudao.module.dataqc.controller.admin.importlog.vo.ImportLogSaveReqVO;
 import cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.HosResourceInfoDO;
 import cn.iocoder.yudao.module.dataqc.dal.mysql.drug.HosResourceInfoMapper;
+import cn.iocoder.yudao.module.dataqc.service.importlog.ImportLogService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -40,23 +44,32 @@ public class HosResourceInfoServiceImpl implements HosResourceInfoService {
 
     @Resource
     private HosResourceInfoMapper hosResourceInfoMapper;
+    @Resource
+    private ImportLogService importLogService;
     @Override
     @Transactional(rollbackFor = Exception.class)
     public String importResourceData(MultipartFile file, boolean updateSupport) throws Exception {
-        // 这是Excel导入的标准流程，请仔细学习这个模式
-
-        // 第一步：生成批次号，用于追踪这次导入
+        // 生成批次号
         String batchNo = generateBatchNo();
 
-        try {
-            // 第二步：解析Excel文件
-            List<HosResourceInfoDO> dataList = ExcelUtils.read(file, HosResourceInfoDO.class);
+        // 记录导入日志 - 修复状态设置问题
+        ImportLogSaveReqVO importLogSaveReqVO = new ImportLogSaveReqVO()
+                .setBatchNo(batchNo)
+                .setFileName(file.getOriginalFilename())
+                .setFileType("HOS_RESOURCE_INFO")
+                .setTableName("gh_hos_resource_info")
+                .setStatus("PROCESSING"); // 明确设置状态
 
+        Long logId = importLogService.createImportLog(importLogSaveReqVO);
+
+        try {
+            // 解析Excel文件
+            List<HosResourceInfoRespVO> dataList = ExcelUtils.read(file, HosResourceInfoRespVO.class, 3);
             if (CollUtil.isEmpty(dataList)) {
                 throw exception(IMPORT_DATA_CANNOT_BE_EMPTY);
             }
 
-            // 第三步：数据校验和处理
+            // 数据校验和处理
             List<HosResourceInfoDO> insertList = new ArrayList<>();
             List<HosResourceInfoDO> updateList = new ArrayList<>();
             List<String> errorMsgs = new ArrayList<>();
@@ -65,21 +78,16 @@ public class HosResourceInfoServiceImpl implements HosResourceInfoService {
             Map<String, HosResourceInfoDO> existingDataMap = getExistingDataMap();
 
             for (int i = 0; i < dataList.size(); i++) {
-                HosResourceInfoDO data = dataList.get(i);
-
-                // 数据校验
-                String errorMsg = validateResourceData(data, i + 1);
-                if (StrUtil.isNotEmpty(errorMsg)) {
-                    errorMsgs.add(errorMsg);
-                    continue;
-                }
+                HosResourceInfoRespVO sourceData = dataList.get(i);
+                HosResourceInfoDO data = BeanUtil.copyProperties(sourceData, HosResourceInfoDO.class);
 
                 // 设置默认值
                 data.setImportBatchNo(batchNo);
                 data.setUploadDate(DateUtil.format(DateUtil.date(), "yyyyMMdd"));
 
                 // 判断是否已存在
-                String key = generateDataKey(data);
+                HosResourceInfoDO hosResourceInfoDO = BeanUtil.copyProperties(data, HosResourceInfoDO.class);
+                String key = generateDataKey(hosResourceInfoDO);
                 if (existingDataMap.containsKey(key)) {
                     if (updateSupport) {
                         HosResourceInfoDO existData = existingDataMap.get(key);
@@ -93,7 +101,7 @@ public class HosResourceInfoServiceImpl implements HosResourceInfoService {
                 }
             }
 
-            // 第四步：批量保存数据
+            // 批量保存数据
             if (!insertList.isEmpty()) {
                 saveBatch(insertList);
             }
@@ -101,15 +109,27 @@ public class HosResourceInfoServiceImpl implements HosResourceInfoService {
                 updateBatchById(updateList);
             }
 
-            // 第五步：返回结果统计
+            // 更新导入日志 - 修复ID问题
+            ImportLogSaveReqVO updateImportLogVO = new ImportLogSaveReqVO()
+                    .setId(logId)
+                    .setTotalRows(dataList.size())
+                    .setSuccessRows(insertList.size() + updateList.size())
+                    .setFailRows(errorMsgs.size())
+                    .setStatus(errorMsgs.isEmpty() ? "SUCCESS" : "PARTIAL_SUCCESS")
+                    .setErrorMsg(StrUtil.join("\n", errorMsgs));
+            importLogService.updateImportLog(updateImportLogVO);
+
             return String.format("导入成功！总数：%d，新增：%d，更新：%d，失败：%d",
                     dataList.size(), insertList.size(), updateList.size(), errorMsgs.size());
 
         } catch (Exception e) {
             log.error("导入医疗机构资源数据失败", e);
+            // 更新导入日志为失败状态
+            importLogService.updateImportLogFail(logId, e.getMessage());
             throw exception(IMPORT_FAILED, e.getMessage());
         }
     }
+
     /**
      * 获取已存在数据的映射表，用于快速判断重复数据
      * 设计原理：将数据库查询结果转换为Map结构，实现O(1)时间复杂度的查找
@@ -181,23 +201,6 @@ public class HosResourceInfoServiceImpl implements HosResourceInfoService {
 
     private String generateBatchNo() {
         return "RES_" + DateUtil.format(DateUtil.date(), "yyyyMMddHHmmss") + "_" + RandomUtil.randomNumbers(4);
-    }
-
-    private String validateResourceData(HosResourceInfoDO data, int rowNum) {
-        StringBuilder errors = new StringBuilder();
-
-        if (StrUtil.isEmpty(data.getHospitalCode())) {
-            errors.append("医疗机构代码不能为空；");
-        }
-        if (StrUtil.isEmpty(data.getOrganizationCode())) {
-            errors.append("组织机构代码不能为空；");
-        }
-        // ... 其他校验逻辑
-
-        if (errors.length() > 0) {
-            return "第" + rowNum + "行：" + errors.toString();
-        }
-        return null;
     }
 
     @Override

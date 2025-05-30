@@ -1,9 +1,12 @@
 package cn.iocoder.yudao.module.dataqc.dal.dataobject.drug;
 
 import cn.iocoder.yudao.framework.mybatis.core.dataobject.BaseDO;
+import cn.iocoder.yudao.module.dataqc.util.ExcelDataConverter;
+import com.alibaba.excel.annotation.ExcelProperty;
 import com.baomidou.mybatisplus.annotation.KeySequence;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.*;
 
 import java.math.BigDecimal;
@@ -33,6 +36,11 @@ public class DrugListDO extends BaseDO {
      * 流水号
      */
     private Long serialNum;
+    @Schema(description = "省级行政区划代码") //+
+    private String provinceCode;
+
+    @Schema(description = "医疗机构名称", requiredMode = Schema.RequiredMode.REQUIRED)
+    private String hospitalName;
     /**
      * 系统编码
      */
@@ -108,6 +116,7 @@ public class DrugListDO extends BaseDO {
     /**
      * 转换系数
      */
+    @ExcelProperty(value = "转换系数", converter = ExcelDataConverter.SafeBigDecimalConverter.class)
     private BigDecimal drugFactor;
     /**
      * 是否网上集中采购药品(1是2否)

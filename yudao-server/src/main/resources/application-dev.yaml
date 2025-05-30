@@ -44,7 +44,7 @@ spring:
       primary: master
       datasource:
         master:
-          url: jdbc:mysql://113.45.143.70:3306/data_qc?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&nullCatalogMeansCurrent=true&rewriteBatchedStatements=true # MySQL Connector/J 8.X 连接的示例
+          url: jdbc:mysql://113.45.143.70:3306/drug_qc?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&nullCatalogMeansCurrent=true&rewriteBatchedStatements=true # MySQL Connector/J 8.X 连接的示例
           username: hanford
           password: 9632147890aA
         slave: # 模拟从库，可根据自己需要修改 # 模拟从库，可根据自己需要修改

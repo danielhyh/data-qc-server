@@ -1,5 +1,6 @@
 package cn.iocoder.yudao.module.dataqc.service.drug;
 
+import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.util.RandomUtil;
@@ -7,23 +8,23 @@ import cn.hutool.core.util.StrUtil;
 import cn.iocoder.yudao.framework.common.pojo.PageResult;
 import cn.iocoder.yudao.framework.common.util.object.BeanUtils;
 import cn.iocoder.yudao.framework.excel.core.util.ExcelUtils;
-import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugInoutInfoPageReqVO;
-import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.DrugInoutInfoSaveReqVO;
-import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.InoutStatVO;
+import cn.iocoder.yudao.module.dataqc.controller.admin.drug.vo.*;
 import cn.iocoder.yudao.module.dataqc.controller.admin.importlog.vo.ImportLogSaveReqVO;
 import cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.DrugInoutInfoDO;
-import cn.iocoder.yudao.module.dataqc.dal.dataobject.drug.DrugListDO;
 import cn.iocoder.yudao.module.dataqc.dal.mysql.drug.DrugInoutInfoMapper;
 import cn.iocoder.yudao.module.dataqc.service.importlog.ImportLogService;
+import com.alibaba.excel.EasyExcel;
+import com.alibaba.excel.context.AnalysisContext;
+import com.alibaba.excel.event.AnalysisEventListener;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.time.DateFormatUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Date;
@@ -43,6 +44,7 @@ import static com.baomidou.mybatisplus.extension.toolkit.Db.saveBatch;
  */
 @Service
 @Validated
+@Slf4j
 public class DrugInoutInfoServiceImpl implements DrugInoutInfoService {
 
     @Resource
@@ -155,62 +157,59 @@ public class DrugInoutInfoServiceImpl implements DrugInoutInfoService {
                               String ioType, String sourceType) throws Exception {
 
         String batchNo = generateBatchNo();
-        ImportLogSaveReqVO importLogSaveReqVO = new ImportLogSaveReqVO().setBatchNo(batchNo).setFileName(file.getOriginalFilename())
-                .setFileType("DRUG_INOUT_INFO").setTableName("gh_drug_inout_info");
+
+        // 记录导入日志
+        ImportLogSaveReqVO importLogSaveReqVO = new ImportLogSaveReqVO()
+                .setBatchNo(batchNo)
+                .setFileName(file.getOriginalFilename())
+                .setFileType("DRUG_INOUT_INFO")
+                .setTableName("gh_drug_inout_info")
+                .setStatus("PROCESSING");
+
         Long logId = importLogService.createImportLog(importLogSaveReqVO);
 
         try {
-            List<DrugInoutInfoDO> dataList = ExcelUtils.read(file, DrugInoutInfoDO.class);
-
+            // 根据类型读取不同的Excel结构
             List<DrugInoutInfoDO> insertList = new ArrayList<>();
             List<String> errorMsgs = new ArrayList<>();
+            int totalRows = 0;
 
-            for (int i = 0; i < dataList.size(); i++) {
-                DrugInoutInfoDO inout = dataList.get(i);
+            if ("IN".equals(ioType)) {
+                // 入库数据处理
+                List<DrugInInfoRespVO> inDataList = ExcelUtils.read(file, DrugInInfoRespVO.class, 3);
+                totalRows = inDataList.size();
 
-                // 设置出入库类型
-                inout.setIoType(ioType);
-                inout.setSourceType(sourceType);
+                for (int i = 0; i < inDataList.size(); i++) {
+                    DrugInInfoRespVO sourceInout = inDataList.get(i);
+                    DrugInoutInfoDO inout = convertInDataToDO(sourceInout, ioType, sourceType, i + 1);
 
-                // 数据校验
-                String errorMsg = validator.validateInoutInfo(inout, i + 1);
-                if (StrUtil.isNotEmpty(errorMsg)) {
-                    errorMsgs.add(errorMsg);
-                    continue;
+//                    String errorMsg = processAndValidateData(inout, i + 1);
+//                    if (StrUtil.isNotEmpty(errorMsg)) {
+//                        errorMsgs.add(errorMsg);
+//                        continue;
+//                    }
+
+                    insertList.add(inout);
                 }
+            } else if ("OUT".equals(ioType)) {
+                // 出库数据处理
+                List<DrugOutInfoRespVO> outDataList = ExcelUtils.read(file, DrugOutInfoRespVO.class, 3);
+                totalRows = outDataList.size();
 
-                // 验证药品是否存在于药品目录
-                DrugListDO drug = drugListService.selectByHosDrugId(inout.getHosDrugId());
-                if (drug == null) {
-                    errorMsgs.add("第" + (i + 1) + "行：院内药品编码["
-                            + inout.getHosDrugId() + "]在药品目录中不存在");
-                    continue;
+                for (int i = 0; i < outDataList.size(); i++) {
+                    DrugOutInfoRespVO sourceInout = outDataList.get(i);
+                    DrugInoutInfoDO inout = convertOutDataToDO(sourceInout, ioType, sourceType, i + 1);
+
+//                    String errorMsg = processAndValidateData(inout, i + 1);
+//                    if (StrUtil.isNotEmpty(errorMsg)) {
+//                        errorMsgs.add(errorMsg);
+//                        continue;
+//                    }
+
+                    insertList.add(inout);
                 }
-
-                // 自动填充药品信息
-                inout.setYpid(drug.getYpid());
-                inout.setPrDrugId(drug.getPrDrugId());
-                inout.setProductName(drug.getProductName());
-
-                // 计算制剂单位数量
-                if ("IN".equals(ioType)) {
-                    inout.setInDosageQuantity(
-                            inout.getInPackQuantity() * drug.getDrugFactor().longValue());
-                    inout.setInDosagePrice(
-                            inout.getInPackPrice().divide(drug.getDrugFactor(), 2,
-                                    BigDecimal.ROUND_HALF_UP));
-                } else {
-                    inout.setOutDosageQuantity(
-                            inout.getOutPackQuantity() * drug.getDrugFactor().longValue());
-                }
-
-                // 设置其他默认值
-                inout.setSerialNum((long) (i + 1));
-                inout.setUploadDate(DateFormatUtils.format(new Date(), "yyyyMMdd"));
-                inout.setImportBatchNo(batchNo);
-                inout.setImportTime(LocalDateTime.now());
-
-                insertList.add(inout);
+            } else {
+                throw new IllegalArgumentException("不支持的出入库类型: " + ioType);
             }
 
             // 保存数据
@@ -219,17 +218,104 @@ public class DrugInoutInfoServiceImpl implements DrugInoutInfoService {
             }
 
             // 更新导入日志
-            ImportLogSaveReqVO updateImportLogVO = new ImportLogSaveReqVO().setId(logId).setSuccessRows(insertList.size())
-                    .setFailRows(errorMsgs.size()).setErrorMsg(StrUtil.join("\n", errorMsgs));
+            ImportLogSaveReqVO updateImportLogVO = new ImportLogSaveReqVO()
+                    .setId(logId)
+                    .setTotalRows(totalRows)
+                    .setSuccessRows(totalRows)
+                    .setStatus("SUCCESS");
             importLogService.updateImportLog(updateImportLogVO);
 
             return String.format("导入成功！总数：%d，成功：%d，失败：%d",
-                    dataList.size(), insertList.size(), errorMsgs.size());
+                    totalRows, insertList.size(), 0);
 
         } catch (Exception e) {
+            log.error("导入出入库数据失败", e);
             importLogService.updateImportLogFail(logId, e.getMessage());
             throw exception(IMPORT_FAILED, e.getMessage());
         }
+    }
+
+    /**
+     * 转换入库数据到DO对象
+     */
+    private DrugInoutInfoDO convertInDataToDO(DrugInInfoRespVO sourceInout, String ioType,
+                                              String sourceType, int rowNum) {
+        DrugInoutInfoDO inout = new DrugInoutInfoDO();
+
+        // 复制公共字段
+        BeanUtil.copyProperties(sourceInout, inout);
+
+        // 设置出入库类型
+        inout.setIoType(ioType);
+        inout.setSourceType(sourceType);
+
+        // 处理入库特有字段
+        inout.setInPackQuantity(sourceInout.getInPackQuantity());
+        inout.setInDosageQuantity(sourceInout.getInDosageQuantity());
+        inout.setInTotalPrice(sourceInout.getInTotalPrice());
+
+        // 设置默认值
+        inout.setSerialNum((long) rowNum);
+        inout.setUploadDate(DateFormatUtils.format(new Date(), "yyyyMMdd"));
+        inout.setImportTime(LocalDateTime.now());
+
+        return inout;
+    }
+
+    /**
+     * 转换出库数据到DO对象
+     */
+    private DrugInoutInfoDO convertOutDataToDO(DrugOutInfoRespVO sourceInout, String ioType,
+                                               String sourceType, int rowNum) {
+        DrugInoutInfoDO inout = new DrugInoutInfoDO();
+
+        // 复制公共字段
+        BeanUtil.copyProperties(sourceInout, inout);
+
+        // 设置出入库类型
+        inout.setIoType(ioType);
+        inout.setSourceType(sourceType);
+
+        // 处理出库特有字段
+        inout.setOutPackQuantity(sourceInout.getOutPackQuantity());
+        inout.setOutDosageQuantity(sourceInout.getOutDosageQuantity());
+
+        // 设置默认值
+        inout.setSerialNum((long) rowNum);
+        inout.setUploadDate(DateFormatUtils.format(new Date(), "yyyyMMdd"));
+        inout.setImportTime(LocalDateTime.now());
+
+        return inout;
+    }
+
+    /**
+     * 安全读取Excel数据
+     */
+    private List<DrugInoutInfoDO> safeReadExcelData(MultipartFile file) {
+        List<DrugInoutInfoDO> result = new ArrayList<>();
+        try {
+            EasyExcel.read(file.getInputStream(), DrugInoutInfoDO.class, new AnalysisEventListener<DrugInoutInfoDO>() {
+                @Override
+                public void invoke(DrugInoutInfoDO data, AnalysisContext context) {
+                    result.add(data);
+                }
+
+                @Override
+                public void doAfterAllAnalysed(AnalysisContext context) {
+                    log.info("安全模式读取出入库数据完成，共{}行", result.size());
+                }
+
+                @Override
+                public void onException(Exception exception, AnalysisContext context) {
+                    log.warn("第{}行读取异常，跳过：{}", context.readRowHolder().getRowIndex(), exception.getMessage());
+                }
+            }).sheet().doRead();
+
+        } catch (Exception e) {
+            log.error("安全模式读取出入库数据失败", e);
+            throw new RuntimeException("Excel文件读取失败", e);
+        }
+        return result;
     }
 
     @Override
