@@ -1,5 +1,9 @@
 package cn.iocoder.yudao.module.drug.service.batch;
 
+import cn.iocoder.yudao.framework.common.pojo.PageResult;
+import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportTaskPageReqVO;
+import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDO;
+import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDetailDO;
 import org.springframework.web.multipart.MultipartFile;
 
 /**
@@ -26,7 +30,7 @@ public interface DrugBatchImportService {
      * @param taskId 任务ID
      * @return 任务详情，包含所有明细
      */
-    DrugImportTaskDetailVO getTaskDetail(Long taskId);
+    ImportTaskDetailDO getTaskDetail(Long taskId);
     
     /**
      * 获取任务实时进度
@@ -51,8 +55,8 @@ public interface DrugBatchImportService {
     
     /**
      * 分页查询导入任务列表
-     * @param queryParam 查询参数
+     * @param pageReqVO 查询参数
      * @return 分页结果
      */
-    PageResult<DrugImportTaskVO> getTaskPage(DrugImportTaskPageReq queryParam);
+    PageResult<ImportTaskDO> getTaskPage(ImportTaskPageReqVO pageReqVO);
 }

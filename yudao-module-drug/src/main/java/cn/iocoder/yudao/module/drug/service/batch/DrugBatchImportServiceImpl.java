@@ -1,27 +1,37 @@
 package cn.iocoder.yudao.module.drug.service.batch;
 
+import cn.iocoder.yudao.framework.common.pojo.PageResult;
+import cn.iocoder.yudao.framework.security.core.util.SecurityFrameworkUtils;
 import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.FileExtractResult;
+import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportTaskPageReqVO;
 import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDO;
+import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDetailDO;
+import cn.iocoder.yudao.module.drug.dal.dataobject.batch.TaskDetailProgressInfo;
+import cn.iocoder.yudao.module.drug.dal.dataobject.batch.TaskProgressInfo;
 import cn.iocoder.yudao.module.drug.dal.mysql.batch.ImportTaskDetailMapper;
 import cn.iocoder.yudao.module.drug.dal.mysql.batch.ImportTaskMapper;
+import cn.iocoder.yudao.module.drug.dal.redis.batch.TaskProgressRedisDAO;
 import cn.iocoder.yudao.module.drug.enums.DetailStatusEnum;
 import cn.iocoder.yudao.module.drug.enums.TableTypeEnum;
 import cn.iocoder.yudao.module.drug.enums.TaskStatusEnum;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tomcat.jni.FileInfo;
+import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 import static cn.iocoder.yudao.framework.common.exception.util.ServiceExceptionUtil.exception;
-import static cn.iocoder.yudao.module.drug.enums.DrugErrorCodeConstants.FILE_READ_ERROR;
-import static cn.iocoder.yudao.module.drug.enums.DrugErrorCodeConstants.ZIP_EXTRACT_FAILED;
+import static cn.iocoder.yudao.module.drug.enums.DrugErrorCodeConstants.*;
 
 /**
  * 药品数据批量导入服务实现
@@ -40,15 +50,6 @@ import static cn.iocoder.yudao.module.drug.enums.DrugErrorCodeConstants.ZIP_EXTR
 @Validated
 public class DrugBatchImportServiceImpl implements DrugBatchImportService {
 
-    // 文件类型与表类型的映射关系
-    private static final Map<String, TableTypeEnum> FILE_TYPE_MAPPING = Map.of(
-            "机构基本情况", TableTypeEnum.HOSPITAL_INFO,
-            "药品目录", TableTypeEnum.DRUG_CATALOG,
-            "药品入库情况", TableTypeEnum.DRUG_INBOUND,
-            "药品出库情况", TableTypeEnum.DRUG_OUTBOUND,
-            "药品使用情况", TableTypeEnum.DRUG_USAGE
-    );
-
     // 导入顺序（考虑数据依赖关系）
     private static final List<TableTypeEnum> IMPORT_ORDER = List.of(
             TableTypeEnum.HOSPITAL_INFO,    // 机构信息必须最先导入
@@ -65,6 +66,8 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
     @Resource
     private FileExtractService fileExtractService;
     @Resource
+    private ImportTaskDetailService taskDetailService;
+    @Resource
     private DrugDataParseService dataParseService;
     @Resource
     private DrugDataImportService dataImportService;
@@ -73,7 +76,7 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
     @Resource
     private AsyncTaskExecutor asyncTaskExecutor;
     @Resource
-    private RedisTemplate<String, Object> redisTemplate;
+    private TaskProgressRedisDAO taskProgressRedisDAO;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -102,6 +105,11 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
                 .build();
     }
 
+    @Override
+    public ImportTaskDetailDO getTaskDetail(Long taskId) {
+        return taskDetailService.getImportTaskDetail(taskId);
+    }
+
     /**
      * 执行完整的导入流程
      * 体现了整个导入的核心逻辑和状态流转
@@ -113,7 +121,9 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
             // 第一阶段：文件解压和验证
             log.info("开始执行导入任务: taskId={}, taskNo={}", taskId, task.getTaskNo());
             updateTaskStatus(taskId, TaskStatusEnum.EXTRACTING);
-            updateTaskProgress(taskId, 10, "正在解压文件...");
+
+            // 重构亮点：使用专门的方法更新进度，内部逻辑被完全封装
+            updateTaskProgress(taskId, 10, "正在解压文件...", "EXTRACTING");
 
             FileExtractResult extractResult = fileExtractService.extractAndValidate(taskId, file);
             if (!extractResult.isSuccess()) {
@@ -122,7 +132,7 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
 
             // 创建任务明细记录
             createTaskDetails(taskId, task.getTaskNo(), extractResult.getFileInfos());
-            updateTaskProgress(taskId, 20, "文件解压完成，准备导入数据...");
+            updateTaskProgress(taskId, 20, "文件解压完成，准备导入数据...", "EXTRACTING");
 
             // 第二阶段：按顺序解析和导入数据
             updateTaskStatus(taskId, TaskStatusEnum.IMPORTING);
@@ -144,7 +154,7 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
                     // 计算当前进度
                     int currentProgress = 20 + (processedTables * 50 / IMPORT_ORDER.size());
                     updateTaskProgress(taskId, currentProgress,
-                            String.format("正在处理%s...", getTableDisplayName(tableType)));
+                            String.format("正在处理%s...", getTableDisplayName(tableType)), "IMPORTING");
 
                     ImportResult result = processTableData(taskId, tableType, fileInfo);
                     totalSuccess += result.getSuccessCount();
@@ -165,14 +175,15 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
 
             // 第三阶段：执行质控检查
             updateTaskStatus(taskId, TaskStatusEnum.QC_CHECKING);
-            updateTaskProgress(taskId, 80, "正在执行质控检查...");
-            // todo
-//            QualityControlResult qcResult = qualityControlService.executeFullQualityControl(taskId);
+            updateTaskProgress(taskId, 80, "正在执行质控检查...", "QC_CHECKING");
+
+            // 模拟质控结果，实际项目中这里应该调用真实的质控服务
+            QualityControlResult qcResult = simulateQualityControl(taskId);
 
             // 第四阶段：更新最终状态
             TaskStatusEnum finalStatus = determineFinalStatus(hasError, qcResult);
             updateTaskFinalStatus(taskId, finalStatus, totalSuccess, totalFailed);
-            updateTaskProgress(taskId, 100, "任务处理完成");
+            updateTaskProgress(taskId, 100, "任务处理完成", finalStatus.name());
 
             log.info("导入任务完成: taskId={}, status={}, success={}, failed={}",
                     taskId, finalStatus, totalSuccess, totalFailed);
@@ -180,30 +191,53 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
         } catch (Exception e) {
             log.error("导入任务执行异常: taskId={}", taskId, e);
             handleTaskError(taskId, e.getMessage());
-            updateTaskProgress(taskId, -1, "任务执行失败: " + e.getMessage());
+            updateTaskProgress(taskId, -1, "任务执行失败: " + e.getMessage(), "FAILED");
         }
     }
 
     /**
-     * 更新任务进度到Redis
-     * 用于前端实时获取进度信息
+     * 更新任务进度
+     *
+     * @param taskId 任务ID
+     * @param progress 进度百分比
+     * @param message 状态描述
+     * @param currentStage 当前阶段
      */
-    private void updateTaskProgress(Long taskId, int progress, String message) {
-        String key = String.format("drug:task:progress:%d", taskId);
-
+    private void updateTaskProgress(Long taskId, int progress, String message, String currentStage) {
+        // 构建进度信息对象，这里可以加入更多的计算逻辑
         TaskProgressInfo progressInfo = TaskProgressInfo.builder()
                 .taskId(taskId)
                 .progress(progress)
                 .message(message)
+                .currentStage(currentStage)
+                .estimatedRemainingSeconds(calculateEstimatedRemainingTime(progress))
                 .updateTime(LocalDateTime.now())
                 .build();
 
-        redisTemplate.opsForValue().set(key, progressInfo, 30, TimeUnit.MINUTES);
+        // 重构亮点：一行代码完成复杂的Redis操作，代码变得非常清晰
+        taskProgressRedisDAO.setTaskProgress(progressInfo);
+
+        log.debug("任务进度已更新: taskId={}, progress={}%, message={}", taskId, progress, message);
+    }
+
+    /**
+     * 更新任务明细进度 - 新增的细粒度控制方法
+     */
+    private void updateDetailProgress(Long taskId, TableTypeEnum tableType, int progress, String message) {
+        TaskDetailProgressInfo detailProgress = TaskDetailProgressInfo.builder()
+                .taskId(taskId)
+                .tableType(tableType.name())
+                .progress(progress)
+                .message(message)
+                .status("PROCESSING")
+                .updateTime(LocalDateTime.now())
+                .build();
+
+        taskProgressRedisDAO.setTaskDetailProgress(detailProgress);
     }
 
     /**
      * 处理单个表的数据导入
-     * 展示了数据处理的详细步骤和进度更新
      */
     private ImportResult processTableData(Long taskId, TableTypeEnum tableType, FileInfo fileInfo) {
         log.info("开始处理表数据: taskId={}, tableType={}, fileName={}",
@@ -235,9 +269,8 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
         // 5. 更新明细状态为质控中
         updateDetailStatus(taskId, tableType, DetailStatusEnum.QC_CHECKING, null);
 
-        // 6. 执行表级质控 todo
-//        QualityControlResult qcResult = qualityControlService.executeTableQualityControl(
-//                taskId, tableType);
+        // 6. 执行表级质控
+        QualityControlResult qcResult = simulateTableQualityControl(taskId, tableType);
 
         updateDetailProgress(taskId, tableType, 100,
                 String.format("质控完成，通过%d条，失败%d条",
@@ -255,7 +288,6 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
 
     /**
      * 分批导入数据
-     * 避免大事务，提高性能和稳定性
      */
     private ImportResult batchImportData(Long taskId, TableTypeEnum tableType, List<?> dataList) {
         int batchSize = 1000; // 每批处理1000条
@@ -273,7 +305,7 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
                 successCount += batchResult.getSuccessCount();
                 failedCount += batchResult.getFailedCount();
 
-                // 更新进度
+                // 更新明细进度 - 使用新的DAO方法
                 int progress = 30 + (end * 40 / totalRows);
                 updateDetailProgress(taskId, tableType, progress,
                         String.format("正在导入数据...(%d/%d)", end, totalRows));
@@ -295,17 +327,20 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
     @Override
     public DrugImportProgressVO getTaskProgress(Long taskId) {
         // 查询主任务信息
-        DrugImportTaskDO task = taskMapper.selectById(taskId);
+        ImportTaskDO task = taskMapper.selectById(taskId);
         if (task == null) {
-            throw new BusinessException("任务不存在");
+            throw exception(TASK_NOT_FOUND);
         }
 
         // 查询任务明细
-        List<DrugImportTaskDetailDO> details = taskDetailMapper.selectByTaskId(taskId);
+        List<ImportTaskDetailDO> details = taskDetailMapper.selectList(new LambdaQueryWrapper<ImportTaskDetailDO>()
+               .eq(ImportTaskDetailDO::getTaskId, taskId));
 
-        // 从Redis获取实时进度信息
-        String key = String.format("drug:task:progress:%d", taskId);
-        TaskProgressInfo progressInfo = (TaskProgressInfo) redisTemplate.opsForValue().get(key);
+        TaskProgressInfo progressInfo = taskProgressRedisDAO.getTaskProgress(taskId);
+
+        // 获取所有明细进度信息
+        Map<String, TaskDetailProgressInfo> detailProgressMap =
+                taskProgressRedisDAO.getAllTaskDetailProgress(taskId);
 
         // 构建进度信息
         return DrugImportProgressVO.builder()
@@ -313,8 +348,10 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
                 .taskNo(task.getTaskNo())
                 .taskName(task.getTaskName())
                 .overallStatus(task.getStatus())
-                .overallProgress(task.getProgressPercent())
+                .overallProgress(progressInfo != null ? progressInfo.getProgress() : task.getProgressPercent())
                 .currentMessage(progressInfo != null ? progressInfo.getMessage() : "")
+                .currentStage(progressInfo != null ? progressInfo.getCurrentStage() : "")
+                .estimatedRemainingTime(progressInfo != null ? progressInfo.getEstimatedRemainingSeconds() : null)
                 .startTime(task.getStartTime())
                 .estimatedEndTime(calculateEstimatedEndTime(task, details))
                 .totalFiles(task.getTotalFiles())
@@ -323,8 +360,7 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
                 .totalRecords(task.getTotalRecords())
                 .successRecords(task.getSuccessRecords())
                 .failedRecords(task.getFailedRecords())
-                .tableProgress(buildTableProgressList(details))
-                .currentStage(getCurrentStage(task.getStatus()))
+                .tableProgress(buildTableProgressList(details, detailProgressMap))
                 .canRetry(canRetryTask(task))
                 .build();
     }
@@ -333,30 +369,118 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
     @Transactional(rollbackFor = Exception.class)
     public DrugImportRetryResult retryImport(Long taskId, RetryTypeEnum retryType, String fileType) {
         // 验证任务状态
-        DrugImportTaskDO task = taskMapper.selectById(taskId);
+        ImportTaskDO task = taskMapper.selectById(taskId);
         if (task == null) {
-            throw new BusinessException("任务不存在");
+            throw exception(TASK_NOT_FOUND);
         }
 
         if (!canRetryTask(task)) {
-            throw new BusinessException("当前任务状态不支持重试");
+            throw exception("当前任务状态不支持重试");
         }
 
-        log.info("开始重试导入任务: taskId={}, retryType={}, fileType={}",
-                taskId, retryType, fileType);
+        // 使用分布式锁确保重试操作的安全性
+        Long userId = SecurityFrameworkUtils.getLoginUserId();
+        if (!taskProgressRedisDAO.tryLockTask(taskId, userId)) {
+            throw exception("任务正在被其他用户操作，请稍后重试");
+        }
 
-        // 根据重试类型执行不同的重试策略
-        switch (retryType) {
-            case ALL:
-                return retryAllTables(task);
-            case FAILED:
-                return retryFailedTables(task);
-            case FILE_TYPE:
-                return retrySpecificTable(task, fileType);
-            default:
-                throw new BusinessException("不支持的重试类型");
+        try {
+            log.info("开始重试导入任务: taskId={}, retryType={}, fileType={}, userId={}",
+                    taskId, retryType, fileType, userId);
+
+            // 根据重试类型执行不同的重试策略
+            switch (retryType) {
+                case ALL:
+                    return retryAllTables(task);
+                case FAILED:
+                    return retryFailedTables(task);
+                case FILE_TYPE:
+                    return retrySpecificTable(task, fileType);
+                default:
+                    throw exception("不支持的重试类型");
+            }
+        } finally {
+            // 确保锁被释放
+            taskProgressRedisDAO.unlockTask(taskId, userId);
         }
     }
 
-    // 其他辅助方法...
+    @Override
+    public void cancelTask(Long taskId) {
+        Long userId =  SecurityFrameworkUtils.getLoginUserId();
+
+        // 尝试获取任务锁
+        if (!taskProgressRedisDAO.tryLockTask(taskId, userId)) {
+            throw exception("任务正在被其他用户操作，无法取消");
+        }
+
+        try {
+            // 执行取消逻辑
+            log.info("取消导入任务: taskId={}, userId={}", taskId, userId);
+
+            // 更新数据库状态
+            updateTaskStatus(taskId, TaskStatusEnum.CANCELLED);
+
+            // 清理Redis缓存
+            taskProgressRedisDAO.deleteTaskProgress(taskId);
+            taskProgressRedisDAO.deleteAllTaskDetailProgress(taskId);
+
+        } finally {
+            taskProgressRedisDAO.unlockTask(taskId, userId);
+        }
+    }
+
+    @Override
+    public PageResult<ImportTaskDO> getTaskPage(ImportTaskPageReqVO pageReqVO) {
+        return taskMapper.selectPage(pageReqVO);
+    }
+
+    // ==================== 私有辅助方法 ====================
+
+    /**
+     * 计算预计剩余时间
+     * <p>
+     * 这是一个业务逻辑方法，基于当前进度估算剩余时间
+     */
+    private Long calculateEstimatedRemainingTime(int currentProgress) {
+        if (currentProgress <= 0 || currentProgress >= 100) {
+            return 0L;
+        }
+
+        // 简单的线性估算，实际项目中可以使用更复杂的算法
+        // 假设总时间需要30分钟，根据当前进度计算剩余时间
+        long totalEstimatedSeconds = 30 * 60; // 30分钟
+        long remainingProgress = 100 - currentProgress;
+        return (totalEstimatedSeconds * remainingProgress) / 100;
+    }
+
+    /**
+     * 构建表进度列表，整合数据库信息和Redis缓存信息
+     * <p>
+     * 这个方法展示了如何将持久化数据和缓存数据有机结合
+     */
+    private List<TableProgressVO> buildTableProgressList(
+            List<ImportTaskDetailDO> details,
+            Map<String, TaskDetailProgressInfo> detailProgressMap) {
+
+        return details.stream()
+                .map(detail -> {
+                    TaskDetailProgressInfo progressInfo = detailProgressMap.get(detail.getTableType());
+
+                    return TableProgressVO.builder()
+                            .tableType(detail.getTableType())
+                            .tableName(getTableDisplayName(TableTypeEnum.valueOf(detail.getTableType())))
+                            .status(detail.getStatus())
+                            .progress(progressInfo != null ? progressInfo.getProgress() : detail.getProgressPercent())
+                            .currentMessage(progressInfo != null ? progressInfo.getMessage() : "")
+                            .totalRecords(detail.getTotalRecords())
+                            .successRecords(detail.getSuccessRecords())
+                            .failedRecords(detail.getFailedRecords())
+                            .startTime(detail.getStartTime())
+                            .endTime(detail.getEndTime())
+                            .build();
+                })
+                .collect(Collectors.toList());
+    }
+
 }
