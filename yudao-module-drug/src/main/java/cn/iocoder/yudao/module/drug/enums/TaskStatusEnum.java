@@ -13,7 +13,8 @@ public enum TaskStatusEnum {
     QC_CHECKING(3, "质控中"),
     COMPLETED(4, "完成"),
     FAILED(5, "失败"),
-    PARTIAL_SUCCESS(6, "部分成功");
+    PARTIAL_SUCCESS(6, "部分成功"),
+    CANCELLED(7, "已取消");
     
     private final Integer status;
     private final String description;

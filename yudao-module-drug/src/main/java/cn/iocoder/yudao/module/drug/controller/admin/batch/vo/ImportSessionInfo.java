@@ -1,4 +1,4 @@
-package cn.iocoder.yudao.module.drug.dal.dataobject.batch;
+package cn.iocoder.yudao.module.drug.controller.admin.batch.vo;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;

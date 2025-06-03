@@ -51,6 +51,9 @@ public interface DrugErrorCodeConstants {
     ErrorCode IMPORT_DATA_TOO_LARGE = new ErrorCode(1_003_002_007, "导入数据量过大，单次最多支持{}条记录");
     ErrorCode IMPORT_TABLE_NOT_FOUND = new ErrorCode(1_003_002_008, "找不到指定的数据表：{}");
     ErrorCode IMPORT_TRANSACTION_ROLLBACK = new ErrorCode(1_003_002_009, "数据导入事务回滚，原因：{}");
+    ErrorCode IMPORT_RETRY_NOT_SUPPORTED = new ErrorCode(1_003_002_010, "当前任务状态不支持重试");
+    ErrorCode IMPORT_TASK_LOCKED = new ErrorCode(1_003_002_011, "任务正在被其他用户操作，请稍后重试");
+    ErrorCode IMPORT_RETRY_TYPE_UNSUPPORTED = new ErrorCode(1_003_002_012, "不支持的重试类型：{}");
 
     // ========== 质控模块 1-003-003-000 ==========
     ErrorCode QC_RULE_EXECUTE_FAILED = new ErrorCode(1_003_003_000, "质控规则执行失败：{}");

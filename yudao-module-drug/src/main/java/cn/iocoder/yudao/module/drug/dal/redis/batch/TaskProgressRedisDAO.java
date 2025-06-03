@@ -2,14 +2,16 @@ package cn.iocoder.yudao.module.drug.dal.redis.batch;
 
 import cn.iocoder.yudao.framework.common.util.collection.CollectionUtils;
 import cn.iocoder.yudao.framework.common.util.json.JsonUtils;
-import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportSessionInfo;
-import cn.iocoder.yudao.module.drug.dal.dataobject.batch.TaskDetailProgressInfo;
-import cn.iocoder.yudao.module.drug.dal.dataobject.batch.TaskProgressInfo;
+import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportSessionInfo;
+import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.TaskDetailProgressInfo;
+import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.TaskProgressInfo;
 import jakarta.annotation.Resource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -19,13 +21,13 @@ import java.util.stream.Collectors;
 import static cn.iocoder.yudao.module.drug.dal.redis.RedisKeyConstants.*;
 
 /**
- * 任务进度相关的 Redis 数据访问层
+ * 任务进度相关的 Redis 数据访问层 - 增强版
  * <p>
  * 设计理念：
- * 1. 职责分离：专门处理任务进度相关的缓存操作，与业务逻辑解耦
- * 2. 统一管理：集中管理所有任务进度相关的Redis操作，便于维护和优化
- * 3. 性能优化：合理设置过期时间，避免缓存堆积；支持批量操作，减少网络往返
- * 4. 数据一致性：确保缓存数据的时效性和准确性
+ * 1. 职责集中：统一管理任务相关的所有Redis操作，包括编号生成
+ * 2. 原子操作：利用Redis的原子性保证数据一致性
+ * 3. 性能优化：支持批量操作，合理设置过期时间
+ * 4. 可扩展性：预留扩展接口，支持未来的功能增强
  *
  * @author yourname
  * @since 2024-06-03
@@ -35,6 +37,55 @@ public class TaskProgressRedisDAO {
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    // ==================== 任务编号生成 ====================
+
+    /**
+     * 生成唯一的任务编号
+     * <p>
+     * 设计理念：
+     * - 使用Redis原子递增确保编号唯一性
+     * - 按日期分片，避免序号过大且便于数据清理
+     * - 统一格式便于运维查询和问题定位
+     * 
+     * 格式：DRUG_YYYYMMDD_XXXXXX
+     * 示例：DRUG_20240603_000001
+     *
+     * @return 唯一任务编号
+     */
+    public String generateTaskNo() {
+        LocalDateTime now = LocalDateTime.now();
+        String dateStr = now.format(DateTimeFormatter.ofPattern("yyyyMMdd"));
+
+        // 使用Redis原子递增生成序号，避免并发冲突
+        String redisKey = "drug:task:sequence:" + dateStr;
+        Long sequence = stringRedisTemplate.opsForValue().increment(redisKey);
+        
+        // 设置当天过期，第二天自动重置序号从1开始
+        stringRedisTemplate.expire(redisKey, Duration.ofDays(1));
+
+        return String.format("DRUG_%s_%06d", dateStr, sequence);
+    }
+
+    /**
+     * 生成重试批次编号
+     * <p>
+     * 用于标识重试操作的批次，便于追踪重试历史
+     *
+     * @param taskId     原任务ID
+     * @param retryType  重试类型
+     * @return 重试批次编号
+     */
+    public String generateRetryBatchNo(Long taskId, String retryType) {
+        String dateStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmm"));
+        String redisKey = "drug:retry:sequence:" + dateStr;
+        Long sequence = stringRedisTemplate.opsForValue().increment(redisKey);
+        
+        // 重试序号过期时间设置为1小时
+        stringRedisTemplate.expire(redisKey, Duration.ofHours(1));
+        
+        return String.format("RETRY_%d_%s_%s_%04d", taskId, retryType, dateStr, sequence);
+    }
 
     // ==================== 任务总体进度相关操作 ====================
 
@@ -55,16 +106,17 @@ public class TaskProgressRedisDAO {
     /**
      * 设置任务进度信息
      * <p>
-     * 在保存前会清理一些不必要的字段，减少Redis内存占用
-     * 过期时间设置为30分钟，平衡了实时性和资源消耗
+     * 优化策略：
+     * - 清理不必要字段减少内存占用
+     * - 强制更新时间确保数据时效性
+     * - 合理的过期时间平衡实时性和资源消耗
      *
      * @param progressInfo 任务进度信息
      */
     public void setTaskProgress(TaskProgressInfo progressInfo) {
         String redisKey = formatTaskProgressKey(progressInfo.getTaskId());
 
-        // 清理不必要的字段，优化缓存大小
-        // 注意：这里我们不清理updateTime，因为它对判断进度活跃性很重要
+        // 构建优化后的进度信息，只保留必要字段
         TaskProgressInfo cleanedInfo = TaskProgressInfo.builder()
                 .taskId(progressInfo.getTaskId())
                 .progress(progressInfo.getProgress())
@@ -75,7 +127,7 @@ public class TaskProgressRedisDAO {
                 .extraInfo(progressInfo.getExtraInfo())
                 .build();
 
-        // 设置30分钟过期时间，这个时间足够长，可以支持大部分导入任务
+        // 设置30分钟过期时间，足够支持大部分导入任务
         stringRedisTemplate.opsForValue().set(
                 redisKey,
                 JsonUtils.toJsonString(cleanedInfo),
@@ -158,8 +210,9 @@ public class TaskProgressRedisDAO {
     /**
      * 获取任务的所有明细进度信息
      * <p>
-     * 这个方法通过模式匹配来查找所有相关的明细进度
-     * 注意：在生产环境中，如果明细数量很大，建议改用Hash结构存储
+     * 性能注意事项：
+     * - 使用SCAN代替KEYS避免阻塞Redis
+     * - 在生产环境中建议改用Hash结构存储明细进度
      *
      * @param taskId 任务ID
      * @return 所有明细进度信息的Map，key为tableType
@@ -167,9 +220,10 @@ public class TaskProgressRedisDAO {
     public Map<String, TaskDetailProgressInfo> getAllTaskDetailProgress(Long taskId) {
         String pattern = formatTaskDetailProgressKey(taskId, "*");
 
+        // TODO: 生产环境建议使用SCAN替代keys，避免Redis阻塞
         return stringRedisTemplate.keys(pattern).stream()
                 .collect(Collectors.toMap(
-                        key -> extractTableTypeFromKey(key),
+                        this::extractTableTypeFromKey,
                         key -> {
                             String jsonValue = stringRedisTemplate.opsForValue().get(key);
                             return JsonUtils.parseObject(jsonValue, TaskDetailProgressInfo.class);
@@ -192,7 +246,10 @@ public class TaskProgressRedisDAO {
     /**
      * 尝试获取任务锁
      * <p>
-     * 用于防止同一个任务被并发操作，比如同时取消和重试
+     * 分布式锁实现：
+     * - 使用setIfAbsent保证原子性
+     * - 设置过期时间防止死锁
+     * - 记录锁的所有者便于验证
      *
      * @param taskId 任务ID
      * @param userId 操作用户ID
@@ -210,6 +267,8 @@ public class TaskProgressRedisDAO {
 
     /**
      * 释放任务锁
+     * <p>
+     * 安全释放：只有锁的所有者才能释放锁
      *
      * @param taskId 任务ID
      * @param userId 操作用户ID（用于验证锁的所有者）
@@ -219,7 +278,7 @@ public class TaskProgressRedisDAO {
         String redisKey = formatTaskLockKey(taskId);
         String currentLockOwner = stringRedisTemplate.opsForValue().get(redisKey);
 
-        // 只有锁的所有者才能释放锁
+        // 只有锁的所有者才能释放锁，防止误释放
         if (userId.toString().equals(currentLockOwner)) {
             stringRedisTemplate.delete(redisKey);
             return true;
@@ -307,9 +366,9 @@ public class TaskProgressRedisDAO {
      * 从Redis键中提取表类型
      * <p>
      * 这是一个辅助方法，用于从Redis键名中解析出tableType
+     * 键格式假设为: "drug:task:detail:{taskId}:{tableType}"
      */
     private String extractTableTypeFromKey(String redisKey) {
-        // 假设键格式是 "drug:task:detail:{taskId}:{tableType}"
         String[] parts = redisKey.split(":");
         return parts.length > 4 ? parts[4] : "";
     }

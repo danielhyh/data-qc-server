@@ -6,7 +6,6 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.*;
 
-import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
@@ -96,7 +95,7 @@ public class ImportTaskDetailDO extends BaseDO {
     /**
      * 处理进度百分比
      */
-    private BigDecimal progressPercent;
+    private int progressPercent;
     /**
      * 开始时间
      */

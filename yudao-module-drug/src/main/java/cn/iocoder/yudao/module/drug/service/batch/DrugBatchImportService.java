@@ -1,9 +1,13 @@
 package cn.iocoder.yudao.module.drug.service.batch;
 
 import cn.iocoder.yudao.framework.common.pojo.PageResult;
+import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportProgressVO;
+import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportRetryResult;
+import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportTaskCreateResult;
 import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportTaskPageReqVO;
 import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDO;
 import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDetailDO;
+import cn.iocoder.yudao.module.drug.enums.RetryTypeEnum;
 import org.springframework.web.multipart.MultipartFile;
 
 /**
@@ -23,7 +27,7 @@ public interface DrugBatchImportService {
      * @param taskName 任务名称
      * @return 任务信息
      */
-    DrugImportTaskCreateResult createImportTask(MultipartFile file, String taskName);
+    ImportTaskCreateResult createImportTask(MultipartFile file, String taskName);
     
     /**
      * 获取任务详细信息
@@ -37,7 +41,7 @@ public interface DrugBatchImportService {
      * @param taskId 任务ID
      * @return 实时进度信息
      */
-    DrugImportProgressVO getTaskProgress(Long taskId);
+    ImportProgressVO getTaskProgress(Long taskId);
     
     /**
      * 重试失败的导入任务
@@ -45,7 +49,7 @@ public interface DrugBatchImportService {
      * @param retryType 重试类型：ALL-全部重试，FAILED-仅失败部分，FILE_TYPE-指定文件类型
      * @param fileType 文件类型（当retryType为FILE_TYPE时必填）
      */
-    DrugImportRetryResult retryImport(Long taskId, RetryTypeEnum retryType, String fileType);
+    ImportRetryResult retryImport(Long taskId, RetryTypeEnum retryType, String fileType);
     
     /**
      * 取消正在进行的任务
