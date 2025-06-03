@@ -7,6 +7,7 @@ import lombok.Data;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Schema(description = "管理后台 - 药品数据导入任务明细 Response VO")
 @Data
@@ -25,6 +26,16 @@ public class ImportTaskDetailRespVO {
     @ExcelProperty("任务编号")
     private String taskNo;
 
+    /**
+     * 任务名称
+     */
+    private String taskName;
+
+    /**
+     * 导入类型
+     */
+    private Integer importType;
+
     @Schema(description = "文件类型:HOSPITAL_INFO,DRUG_CATALOG,DRUG_INBOUND,DRUG_OUTBOUND,DRUG_USAGE", requiredMode = Schema.RequiredMode.REQUIRED, example = "2")
     @ExcelProperty("文件类型:HOSPITAL_INFO,DRUG_CATALOG,DRUG_INBOUND,DRUG_OUTBOUND,DRUG_USAGE")
     private String fileType;
@@ -32,6 +43,95 @@ public class ImportTaskDetailRespVO {
     @Schema(description = "文件名", requiredMode = Schema.RequiredMode.REQUIRED, example = "王五")
     @ExcelProperty("文件名")
     private String fileName;
+
+    /**
+     * 文件路径
+     */
+    private String filePath;
+    /**
+     * 文件大小
+     */
+    private Long fileSize;
+
+    /**
+     * 解压后的文件信息
+     */
+    private Object extractedFiles;
+
+    /**
+     * 状态显示文本
+     */
+    private String statusDisplay;
+
+    /**
+     * 解压状态
+     */
+    private Integer extractStatus;
+
+    /**
+     * 总文件数
+     */
+    private Integer totalFiles;
+
+    /**
+     * 成功文件数
+     */
+    private Integer successFiles;
+
+    /**
+     * 失败文件数
+     */
+    private Integer failedFiles;
+
+    /**
+     * 总记录数
+     */
+    private Long totalRecords;
+
+    /**
+     * 成功记录数
+     */
+    private Long successRecords;
+
+    /**
+     * 失败记录数
+     */
+    private Long failedRecords;
+
+    /**
+     * 表级进度信息
+     */
+    private Object tableProgress;
+
+    /**
+     * 解压结束时间
+     */
+    private LocalDateTime extractEndTime;
+
+    /**
+     * 详细错误信息
+     */
+    private Object errorDetail;
+
+    /**
+     * 更新时间
+     */
+    private LocalDateTime updateTime;
+
+    /**
+     * 创建人
+     */
+    private String creator;
+
+    /**
+     * 是否可重试
+     */
+    private Boolean canRetry;
+
+    /**
+     * 任务明细列表
+     */
+    private List<ImportTaskDetailItemVO> taskDetails;
 
     @Schema(description = "目标表名", requiredMode = Schema.RequiredMode.REQUIRED)
     @ExcelProperty("目标表名")

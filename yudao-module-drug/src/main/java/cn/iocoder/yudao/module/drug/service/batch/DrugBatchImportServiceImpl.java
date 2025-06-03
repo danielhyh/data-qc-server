@@ -12,8 +12,11 @@ import cn.iocoder.yudao.module.drug.enums.DetailStatusEnum;
 import cn.iocoder.yudao.module.drug.enums.RetryTypeEnum;
 import cn.iocoder.yudao.module.drug.enums.TableTypeEnum;
 import cn.iocoder.yudao.module.drug.enums.TaskStatusEnum;
+import com.alibaba.excel.EasyExcel;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import jakarta.annotation.Resource;
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.task.AsyncTaskExecutor;
@@ -24,12 +27,16 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -93,7 +100,7 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public ImportTaskCreateResult createImportTask(MultipartFile file, String taskName) {
+    public ImportTaskCreateResult createImportTask(MultipartFile file, String taskName, String description) {
         // 1. 基础验证
         validateImportFile(file);
 
@@ -444,42 +451,244 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
         return taskMapper.selectPage(pageReqVO);
     }
 
-    // ==================== 私有辅助方法 ====================
+    /**
+     * 验证导入文件
+     * <p>
+     * 在文件上传前进行预验证，提供快速反馈
+     */
+    @Override
+    public FileValidationResult validateImportFile(MultipartFile file) {
+        log.info("开始验证导入文件: fileName={}, fileSize={}",
+                file.getOriginalFilename(), file.getSize());
+
+        try {
+            // 基础文件验证
+            validateBasicFileProperties(file);
+
+            // 创建临时验证任务ID
+            Long tempTaskId = System.currentTimeMillis();
+
+            // 执行文件解压和验证
+            FileExtractResult extractResult = fileExtractService.extractAndValidate(tempTaskId, file);
+
+            if (extractResult.getSuccess()) {
+                return FileValidationResult.builder()
+                        .valid(true)
+                        .fileName(file.getOriginalFilename())
+                        .fileSize(file.getSize())
+                        .expectedFileCount(5) // 预期5个Excel文件
+                        .actualFileCount(extractResult.getValidFileCount())
+                        .validationMessage("文件验证通过，包含所有必需的Excel文件")
+                        .validationTime(LocalDateTime.now())
+                        .build();
+            } else {
+                return FileValidationResult.builder()
+                        .valid(false)
+                        .fileName(file.getOriginalFilename())
+                        .fileSize(file.getSize())
+                        .expectedFileCount(5)
+                        .actualFileCount(extractResult.getValidFileCount())
+                        .validationMessage(extractResult.getErrorMessage())
+                        .missingFiles(identifyMissingFiles(extractResult))
+                        .validationTime(LocalDateTime.now())
+                        .build();
+            }
+
+        } catch (Exception e) {
+            log.error("文件验证失败: fileName={}", file.getOriginalFilename(), e);
+
+            return FileValidationResult.builder()
+                    .valid(false)
+                    .fileName(file.getOriginalFilename())
+                    .fileSize(file.getSize())
+                    .validationMessage("文件验证失败: " + e.getMessage())
+                    .validationTime(LocalDateTime.now())
+                    .build();
+        }
+    }
 
     /**
-     * 验证导入文件的有效性 - 修复版
+     * 导出任务列表
      * <p>
-     * 修复说明：
-     * 1. 使用StringUtils.hasText()替代简单的null检查，更加健壮
-     * 2. 增加了对空字符串和仅包含空白字符的文件名的检查
-     * 3. 提供更详细的错误信息，便于用户理解和修正问题
+     * 将任务数据导出为Excel文件
      */
-    private void validateImportFile(MultipartFile file) {
+    public void exportTaskList(ImportTaskPageReqVO pageReqVO, HttpServletResponse response) throws IOException {
+        log.info("开始导出任务列表: params={}", pageReqVO);
+
+        // 设置不分页，获取所有符合条件的数据
+        pageReqVO.setPageSize(Integer.MAX_VALUE);
+        PageResult<ImportTaskDO> pageResult = taskMapper.selectPage(pageReqVO);
+
+        List<ImportTaskDO> taskList = pageResult.getList();
+
+        // 设置响应头
+        String fileName = "药品导入任务列表_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")) + ".xlsx";
+        response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        response.setCharacterEncoding("UTF-8");
+        response.setHeader("Content-Disposition",
+                "attachment; filename=" + URLEncoder.encode(fileName, StandardCharsets.UTF_8));
+
+        // 使用EasyExcel导出
+        try (ServletOutputStream outputStream = response.getOutputStream()) {
+            EasyExcel.write(outputStream, ImportTaskExportDTO.class)
+                    .sheet("任务列表")
+                    .doWrite(convertToExportDTO(taskList));
+        }
+
+        log.info("任务列表导出完成: count={}", taskList.size());
+    }
+
+    /**
+     * 获取任务执行日志
+     * <p>
+     * 提供任务执行过程的详细日志信息
+     */
+    public TaskLogVO getTaskLogs(Long taskId, String logLevel) {
+        log.debug("查询任务日志: taskId={}, logLevel={}", taskId, logLevel);
+
+        try {
+            // 构建日志文件路径
+            String logFilePath = buildLogFilePath(taskId);
+
+            // 读取日志文件
+            String logContent = readLogFile(logFilePath, logLevel);
+
+            // 统计日志行数
+            int totalLines = logContent.split("\n").length;
+
+            return TaskLogVO.builder()
+                    .taskId(taskId)
+                    .logs(logContent)
+                    .logLevel(logLevel)
+                    .totalLines(totalLines)
+                    .lastUpdateTime(System.currentTimeMillis())
+                    .logFileSize(calculateLogFileSize(logFilePath))
+                    .hasMoreLogs(totalLines > 1000) // 超过1000行认为有更多日志
+                    .build();
+
+        } catch (Exception e) {
+            log.error("获取任务日志失败: taskId={}", taskId, e);
+
+            return TaskLogVO.builder()
+                    .taskId(taskId)
+                    .logs("日志读取失败: " + e.getMessage())
+                    .logLevel(logLevel)
+                    .totalLines(0)
+                    .lastUpdateTime(System.currentTimeMillis())
+                    .logFileSize(0L)
+                    .hasMoreLogs(false)
+                    .build();
+        }
+    }
+
+    // ==================== 私有辅助方法 ====================
+
+    private void validateBasicFileProperties(MultipartFile file) {
         if (file == null || file.isEmpty()) {
-            throw exception(FILE_UPLOAD_FAILED, "上传文件不能为空");
+            throw new IllegalArgumentException("上传文件不能为空");
         }
 
-        String originalFilename = file.getOriginalFilename();
-
-        // 修复：使用更严格的字符串检查，而不是简单的null检查
-        // 某些情况下getOriginalFilename()可能返回空字符串或仅包含空白字符
-        if (!StringUtils.hasText(originalFilename)) {
-            throw exception(FILE_UPLOAD_FAILED, "文件名不能为空或仅包含空白字符");
+        String fileName = file.getOriginalFilename();
+        if (!StringUtils.hasText(fileName)) {
+            throw new IllegalArgumentException("文件名不能为空");
         }
 
-        // 验证文件类型
-        String fileExtension = originalFilename.substring(originalFilename.lastIndexOf(".")).toLowerCase();
-        if (!".zip".equals(fileExtension) && !".rar".equals(fileExtension)) {
-            throw exception(ZIP_FORMAT_UNSUPPORTED, "仅支持ZIP和RAR格式的压缩文件");
+        String extension = getFileExtension(fileName).toLowerCase();
+        if (!".zip".equals(extension) && !".rar".equals(extension)) {
+            throw new IllegalArgumentException("仅支持ZIP和RAR格式的压缩文件");
         }
 
-        // 验证文件大小（100MB限制）
-        long maxSize = 100 * 1024 * 1024L;
+        long maxSize = 100 * 1024 * 1024L; // 100MB
         if (file.getSize() > maxSize) {
-            throw exception(FILE_SIZE_EXCEEDED, "文件大小不能超过100MB");
+            throw new IllegalArgumentException("文件大小不能超过100MB");
+        }
+    }
+
+    private List<String> identifyMissingFiles(FileExtractResult extractResult) {
+        List<String> expectedFiles = Arrays.asList(
+                "机构基本情况.xlsx", "药品目录.xlsx", "药品入库.xlsx", "药品出库.xlsx", "药品使用.xlsx"
+        );
+
+        List<String> actualFiles = extractResult.getFileInfos().values().stream()
+                .map(FileInfo::getFileName)
+                .collect(Collectors.toList());
+
+        return expectedFiles.stream()
+                .filter(expected -> actualFiles.stream()
+                        .noneMatch(actual -> actual.contains(expected.replace(".xlsx", ""))))
+                .collect(Collectors.toList());
+    }
+
+    private List<ImportTaskExportDTO> convertToExportDTO(List<ImportTaskDO> taskList) {
+        return taskList.stream()
+                .map(this::convertToExportDTO)
+                .collect(Collectors.toList());
+    }
+
+    private ImportTaskExportDTO convertToExportDTO(ImportTaskDO task) {
+        return ImportTaskExportDTO.builder()
+                .taskNo(task.getTaskNo())
+                .taskName(task.getTaskName())
+                .fileName(task.getFileName())
+                .statusDisplay(getStatusDisplayText(task.getStatus()))
+                .totalFiles(task.getTotalFiles())
+                .successFiles(task.getSuccessFiles())
+                .failedFiles(task.getFailedFiles())
+                .totalRecords(task.getTotalRecords())
+                .successRecords(task.getSuccessRecords())
+                .failedRecords(task.getFailedRecords())
+                .progressPercent(task.getProgressPercent())
+                .startTime(task.getStartTime())
+                .endTime(task.getEndTime())
+                .createTime(task.getCreateTime())
+                .creator(task.getCreator())
+                .build();
+    }
+
+    private String getStatusDisplayText(Integer status) {
+        return TaskStatusEnum.valueOf(String.valueOf(status)).getDescription();
+    }
+
+    private String buildLogFilePath(Long taskId) {
+        return String.format("/logs/drug-import/task_%d.log", taskId);
+    }
+
+    private String readLogFile(String logFilePath, String logLevel) throws IOException {
+        Path path = Paths.get(logFilePath);
+
+        if (!Files.exists(path)) {
+            return "暂无日志记录";
         }
 
-        log.info("文件验证通过: fileName={}, size={}MB", originalFilename, file.getSize() / 1024 / 1024);
+        List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
+
+        // 根据日志级别过滤
+        if (!"ALL".equals(logLevel)) {
+            lines = lines.stream()
+                    .filter(line -> line.contains(logLevel))
+                    .collect(Collectors.toList());
+        }
+
+        // 限制最大行数
+        if (lines.size() > 1000) {
+            lines = lines.subList(lines.size() - 1000, lines.size());
+        }
+
+        return String.join("\n", lines);
+    }
+
+    private Long calculateLogFileSize(String logFilePath) {
+        try {
+            Path path = Paths.get(logFilePath);
+            return Files.exists(path) ? Files.size(path) : 0L;
+        } catch (IOException e) {
+            return 0L;
+        }
+    }
+
+    private String getFileExtension(String fileName) {
+        int lastDotIndex = fileName.lastIndexOf('.');
+        return lastDotIndex > 0 ? fileName.substring(lastDotIndex) : "";
     }
 
     /**

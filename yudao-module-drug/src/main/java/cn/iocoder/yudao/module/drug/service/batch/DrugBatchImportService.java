@@ -1,14 +1,14 @@
 package cn.iocoder.yudao.module.drug.service.batch;
 
 import cn.iocoder.yudao.framework.common.pojo.PageResult;
-import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportProgressVO;
-import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportRetryResult;
-import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportTaskCreateResult;
-import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.ImportTaskPageReqVO;
+import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.*;
 import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDO;
 import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDetailDO;
 import cn.iocoder.yudao.module.drug.enums.RetryTypeEnum;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.io.IOException;
 
 /**
  * 药品数据批量导入服务
@@ -23,11 +23,13 @@ public interface DrugBatchImportService {
     
     /**
      * 创建批量导入任务
-     * @param file 压缩包文件
-     * @param taskName 任务名称
+     *
+     * @param file        压缩包文件
+     * @param taskName    任务名称
+     * @param description 任务描述
      * @return 任务信息
      */
-    ImportTaskCreateResult createImportTask(MultipartFile file, String taskName);
+    ImportTaskCreateResult createImportTask(MultipartFile file, String taskName, String description);
     
     /**
      * 获取任务详细信息
@@ -63,4 +65,27 @@ public interface DrugBatchImportService {
      * @return 分页结果
      */
     PageResult<ImportTaskDO> getTaskPage(ImportTaskPageReqVO pageReqVO);
+
+    /**
+     * 验证导入文件
+     * @param file 待验证文件
+     * @return 验证结果
+     */
+    FileValidationResult validateImportFile(MultipartFile file);
+
+    /**
+     * 导出任务列表
+     * @param pageReqVO 查询参数
+     * @param response HTTP响应对象
+     * @throws IOException IO异常
+     */
+    void exportTaskList(ImportTaskPageReqVO pageReqVO, HttpServletResponse response) throws IOException;
+
+    /**
+     * 获取任务执行日志
+     * @param taskId 任务ID
+     * @param logLevel 日志级别
+     * @return 任务日志信息
+     */
+    TaskLogVO getTaskLogs(Long taskId, String logLevel);
 }
