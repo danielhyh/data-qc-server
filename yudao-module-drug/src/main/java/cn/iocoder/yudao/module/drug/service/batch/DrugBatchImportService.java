@@ -3,7 +3,6 @@ package cn.iocoder.yudao.module.drug.service.batch;
 import cn.iocoder.yudao.framework.common.pojo.PageResult;
 import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.*;
 import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDO;
-import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDetailDO;
 import cn.iocoder.yudao.module.drug.enums.RetryTypeEnum;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.web.multipart.MultipartFile;
@@ -25,18 +24,17 @@ public interface DrugBatchImportService {
      * 创建批量导入任务
      *
      * @param file        压缩包文件
-     * @param taskName    任务名称
-     * @param description 任务描述
+     * @param params      任务创建参数
      * @return 任务信息
      */
-    ImportTaskCreateResult createImportTask(MultipartFile file, String taskName, String description);
+    ImportTaskCreateResult createImportTask(MultipartFile file, ImportTaskCreateParams params);
     
     /**
      * 获取任务详细信息
      * @param taskId 任务ID
      * @return 任务详情，包含所有明细
      */
-    ImportTaskDetailDO getTaskDetail(Long taskId);
+    ImportTaskDetailVO getTaskDetail(Long taskId);
     
     /**
      * 获取任务实时进度

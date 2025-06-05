@@ -100,24 +100,28 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public ImportTaskCreateResult createImportTask(MultipartFile file, String taskName, String description) {
-        // 1. 基础验证
-        validateImportFile(file);
+    public ImportTaskCreateResult createImportTask(MultipartFile file, ImportTaskCreateParams params) {
+        // 1. 基础文件验证（不读取内容，只检查基本属性）
+        validateBasicFileProperties(file);
 
-        // 2. 创建主任务记录
-        ImportTaskDO task = createTaskRecord(file, taskName);
+        // 2. 立即保存文件到持久化存储
+        String taskNo = taskProgressRedisDAO.generateTaskNo();
+        String savedFilePath = saveUploadedFileImmediately(file, taskNo);
 
-        // 3. 异步启动导入流程
+        // 3. 创建任务记录
+        ImportTaskDO task = createTaskRecord(file, params.getTaskName());
+
+        // 4. 异步执行完整的文件处理流程
         CompletableFuture.runAsync(() -> {
             try {
-                executeImportProcess(task, file);
+                // 现在基于文件路径进行处理，避免MultipartFile重复读取
+                executeImportProcess(task, savedFilePath);
             } catch (Exception e) {
                 log.error("导入任务执行失败: taskId={}", task.getId(), e);
                 handleTaskError(task.getId(), "导入过程异常: " + e.getMessage());
             }
         }, asyncTaskExecutor);
 
-        // 4. 返回结果
         return ImportTaskCreateResult.builder()
                 .taskId(task.getId())
                 .taskNo(task.getTaskNo())
@@ -125,16 +129,164 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
                 .build();
     }
 
+    /**
+     * 获取任务完整详情
+     * 包含任务基本信息、所有明细、实时进度、统计信息等
+     */
     @Override
-    public ImportTaskDetailDO getTaskDetail(Long taskId) {
-        return taskDetailService.getImportTaskDetail(taskId);
+    public ImportTaskDetailVO getTaskDetail(Long taskId) {
+        // 1. 查询任务基本信息
+        ImportTaskDO task = taskMapper.selectById(taskId);
+        if (task == null) {
+            throw exception(TASK_NOT_FOUND);
+        }
+
+        // 2. 查询所有任务明细
+        List<ImportTaskDetailDO> taskDetails = taskDetailMapper.selectList(
+                new LambdaQueryWrapper<ImportTaskDetailDO>()
+                        .eq(ImportTaskDetailDO::getTaskId, taskId)
+                        .orderByAsc(ImportTaskDetailDO::getCreateTime)
+        );
+
+        // 3. 获取实时进度信息
+        TaskProgressInfo progressInfo = taskProgressRedisDAO.getTaskProgress(taskId);
+        Map<String, TaskDetailProgressInfo> detailProgressMap =
+                taskProgressRedisDAO.getAllTaskDetailProgress(taskId);
+
+        // 4. 计算统计信息
+        TaskStatisticsVO statistics = calculateTaskStatistics(task, taskDetails);
+
+        // 5. 获取任务执行日志（最近的100条）
+        List<TaskLogVO> recentLogs = getRecentTaskLogs(taskId, 100);
+
+        // 6. 获取相关任务信息（同一批次或相似任务）
+        List<RelatedTaskVO> relatedTasks = findRelatedTasks(task);
+
+        // 7. 构建完整的详情对象
+        return ImportTaskDetailVO.builder()
+                .taskInfo(convertToTaskInfo(task))
+                .overallProgress(buildOverallProgress(task, progressInfo))
+                .tableDetails(buildTableDetails(taskDetails, detailProgressMap))
+                .statistics(statistics)
+                .timeline(buildTaskTimeline(task, taskDetails))
+                .recentLogs(recentLogs)
+                .relatedTasks(relatedTasks)
+                .operationOptions(buildOperationOptions(task))
+                .qualityReport(buildQualityReport(taskId))
+                .build();
+    }
+
+    /**
+     * 计算任务统计信息
+     */
+    private TaskStatisticsVO calculateTaskStatistics(ImportTaskDO task, List<ImportTaskDetailDO> details) {
+        return TaskStatisticsVO.builder()
+                .totalFiles(task.getTotalFiles())
+                .successFiles(task.getSuccessFiles())
+                .failedFiles(task.getFailedFiles())
+                .totalRecords(task.getTotalRecords())
+                .successRecords(task.getSuccessRecords())
+                .failedRecords(task.getFailedRecords())
+                .overallSuccessRate(calculateSuccessRate(task.getSuccessRecords(), task.getTotalRecords()))
+                .averageProcessingSpeed(calculateProcessingSpeed(task, details))
+                .estimatedTimeRemaining(calculateEstimatedTimeRemaining(task))
+                .fileSuccessRateByType(calculateFileSuccessRateByType(details))
+                .recordSuccessRateByType(calculateRecordSuccessRateByType(details))
+                .qualityScoreDistribution(calculateQualityScoreDistribution(details))
+                .build();
+    }
+
+    /**
+     * 构建任务时间线
+     */
+    private List<TaskTimelineVO> buildTaskTimeline(ImportTaskDO task, List<ImportTaskDetailDO> details) {
+        List<TaskTimelineVO> timeline = new ArrayList<>();
+
+        // 添加主要任务节点
+        if (task.getCreateTime() != null) {
+            timeline.add(TaskTimelineVO.builder()
+                    .timestamp(task.getCreateTime())
+                    .event("TASK_CREATED")
+                    .title("任务创建")
+                    .description("任务已创建，等待处理")
+                    .type("info")
+                    .build());
+        }
+
+        if (task.getStartTime() != null) {
+            timeline.add(TaskTimelineVO.builder()
+                    .timestamp(task.getStartTime())
+                    .event("TASK_STARTED")
+                    .title("开始处理")
+                    .description("任务开始执行")
+                    .type("primary")
+                    .build());
+        }
+
+        // 添加各阶段完成节点
+        addStageTimeline(timeline, task, "EXTRACT", task.getExtractEndTime(), "文件解压完成");
+        addStageTimeline(timeline, task, "IMPORT", task.getImportEndTime(), "数据导入完成");
+        addStageTimeline(timeline, task, "QC", task.getQcEndTime(), "质控检查完成");
+
+        if (task.getEndTime() != null) {
+            timeline.add(TaskTimelineVO.builder()
+                    .timestamp(task.getEndTime())
+                    .event("TASK_COMPLETED")
+                    .title("任务完成")
+                    .description(getTaskCompletionDescription(task))
+                    .type(getTaskCompletionType(task))
+                    .build());
+        }
+
+        // 添加表级别的关键事件
+        details.forEach(detail -> addDetailTimeline(timeline, detail));
+
+        // 按时间排序
+        timeline.sort(Comparator.comparing(TaskTimelineVO::getTimestamp));
+
+        return timeline;
+    }
+
+    /**
+     * 构建操作选项
+     */
+    private TaskOperationOptionsVO buildOperationOptions(ImportTaskDO task) {
+        TaskStatusEnum status = TaskStatusEnum.getByType(task.getStatus());
+
+        return TaskOperationOptionsVO.builder()
+                .canRetry(canRetryTask(task))
+                .canCancel(canCancelTask(task))
+                .canDownloadReport(status == TaskStatusEnum.COMPLETED || status == TaskStatusEnum.PARTIAL_SUCCESS)
+                .canViewLogs(true)
+                .canExportData(status == TaskStatusEnum.COMPLETED)
+                .availableRetryTypes(getAvailableRetryTypes(task))
+                .estimatedRetryDuration(calculateEstimatedRetryDuration(task))
+                .build();
+    }
+
+    /**
+     * 构建质量报告
+     */
+    private TaskQualityReportVO buildQualityReport(Long taskId) {
+        // 从质控服务获取详细的质量报告
+        QualityControlResult qcResult = qualityControlService.getDetailedQualityReport(taskId);
+
+        return TaskQualityReportVO.builder()
+                .overallQualityScore(qcResult.getOverallScore())
+                .dataIntegrityScore(qcResult.getDataIntegrityScore())
+                .consistencyScore(qcResult.getConsistencyScore())
+                .completenessScore(qcResult.getCompletenessScore())
+                .qualityIssues(qcResult.getQualityIssues())
+                .recommendations(qcResult.getRecommendations())
+                .detailedMetrics(qcResult.getDetailedMetrics())
+                .build();
     }
 
     /**
      * 执行完整的导入流程
      * 体现了整个导入的核心逻辑和状态流转
      */
-    private void executeImportProcess(ImportTaskDO task, MultipartFile file) {
+    private void executeImportProcess(ImportTaskDO task, String filePath) {
         Long taskId = task.getId();
 
         try {
@@ -145,7 +297,8 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
             // 更新进度
             updateTaskProgress(taskId, 10, "正在解压文件...", "EXTRACTING");
 
-            FileExtractResult extractResult = fileExtractService.extractAndValidate(taskId, file);
+            // 关键改进：直接基于文件路径进行解压和验证
+            FileExtractResult extractResult = fileExtractService.extractAndValidateFromPath(taskId, filePath);
             if (!extractResult.getSuccess()) {
                 throw exception(ZIP_EXTRACT_FAILED, extractResult.getErrorMessage());
             }
@@ -452,9 +605,8 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
     }
 
     /**
-     * 验证导入文件
-     * <p>
-     * 在文件上传前进行预验证，提供快速反馈
+     * 文件验证接口 - 重构版
+     * 现在也基于保存后的文件进行验证，保持接口的一致性
      */
     @Override
     public FileValidationResult validateImportFile(MultipartFile file) {
@@ -462,49 +614,115 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
                 file.getOriginalFilename(), file.getSize());
 
         try {
-            // 基础文件验证
+            // 1. 基础验证
             validateBasicFileProperties(file);
 
-            // 创建临时验证任务ID
-            Long tempTaskId = System.currentTimeMillis();
+            // 2. 临时保存文件
+            String tempTaskNo = "VALIDATE_" + System.currentTimeMillis();
+            String tempFilePath = saveUploadedFileImmediately(file, tempTaskNo);
 
-            // 执行文件解压和验证
-            FileExtractResult extractResult = fileExtractService.extractAndValidate(tempTaskId, file);
+            try {
+                // 3. 基于文件路径进行深度验证
+                FileExtractResult extractResult = fileExtractService.extractAndValidateFromPath(
+                        System.currentTimeMillis(), tempFilePath);
 
-            if (extractResult.getSuccess()) {
-                return FileValidationResult.builder()
-                        .valid(true)
-                        .fileName(file.getOriginalFilename())
-                        .fileSize(file.getSize())
-                        .expectedFileCount(5) // 预期5个Excel文件
-                        .actualFileCount(extractResult.getValidFileCount())
-                        .validationMessage("文件验证通过，包含所有必需的Excel文件")
-                        .validationTime(LocalDateTime.now())
-                        .build();
-            } else {
-                return FileValidationResult.builder()
-                        .valid(false)
-                        .fileName(file.getOriginalFilename())
-                        .fileSize(file.getSize())
-                        .expectedFileCount(5)
-                        .actualFileCount(extractResult.getValidFileCount())
-                        .validationMessage(extractResult.getErrorMessage())
-                        .missingFiles(identifyMissingFiles(extractResult))
-                        .validationTime(LocalDateTime.now())
-                        .build();
+                if (extractResult.getSuccess()) {
+                    return buildSuccessValidationResult(file, extractResult);
+                } else {
+                    return buildFailedValidationResult(file, extractResult);
+                }
+
+            } finally {
+                // 4. 清理临时文件
+                cleanupTempFile(tempFilePath);
             }
 
         } catch (Exception e) {
             log.error("文件验证失败: fileName={}", file.getOriginalFilename(), e);
-
-            return FileValidationResult.builder()
-                    .valid(false)
-                    .fileName(file.getOriginalFilename())
-                    .fileSize(file.getSize())
-                    .validationMessage("文件验证失败: " + e.getMessage())
-                    .validationTime(LocalDateTime.now())
-                    .build();
+            return buildErrorValidationResult(file, e);
         }
+    }
+
+    /**
+     * 清理临时文件
+     */
+    private void cleanupTempFile(String filePath) {
+        try {
+            Path path = Paths.get(filePath);
+            if (Files.exists(path)) {
+                Files.delete(path);
+                log.debug("临时文件已清理: {}", filePath);
+            }
+        } catch (IOException e) {
+            log.warn("清理临时文件失败: {}", filePath, e);
+        }
+    }
+
+    private FileValidationResult buildSuccessValidationResult(MultipartFile file, FileExtractResult extractResult) {
+        return FileValidationResult.builder()
+                .valid(true)
+                .fileName(file.getOriginalFilename())
+                .fileSize(file.getSize())
+                .expectedFileCount(5)
+                .actualFileCount(extractResult.getValidFileCount())
+                .validationMessage("文件验证通过，包含所有必需的Excel文件")
+                .validationTime(LocalDateTime.now())
+                .extractDurationMs(extractResult.getExtractDurationMs())
+                .extractedFiles(convertToExtractedFileInfoList(extractResult.getFileInfos()))
+                .build();
+    }
+
+    private FileValidationResult buildFailedValidationResult(MultipartFile file, FileExtractResult extractResult) {
+        return FileValidationResult.builder()
+                .valid(false)
+                .fileName(file.getOriginalFilename())
+                .fileSize(file.getSize())
+                .expectedFileCount(5)
+                .actualFileCount(extractResult.getValidFileCount())
+                .validationMessage(extractResult.getErrorMessage())
+                .missingFiles(identifyMissingFiles(extractResult))
+                .validationTime(LocalDateTime.now())
+                .build();
+    }
+
+    private FileValidationResult buildErrorValidationResult(MultipartFile file, Exception e) {
+        return FileValidationResult.builder()
+                .valid(false)
+                .fileName(file.getOriginalFilename())
+                .fileSize(file.getSize())
+                .validationMessage("文件验证失败: " + e.getMessage())
+                .validationTime(LocalDateTime.now())
+                .build();
+    }
+
+    /**
+     * 转换文件信息为前端需要的格式
+     * <p>
+     * 这个方法是关键的数据转换逻辑，将后端的FileInfo转换为前端期望的ExtractedFileInfo
+     */
+    private List<FileValidationResult.ExtractedFileInfo> convertToExtractedFileInfoList(
+            Map<TableTypeEnum, FileInfo> fileInfoMap) {
+
+        return fileInfoMap.entrySet().stream()
+                .map(entry -> {
+                    TableTypeEnum tableType = entry.getKey();
+                    FileInfo fileInfo = entry.getValue();
+
+                    return FileValidationResult.ExtractedFileInfo.builder()
+                            .fileName(fileInfo.getFileName())
+                            .tableType(tableType.name()) // 将枚举转换为字符串
+                            .rowCount(fileInfo.getEstimatedRowCount())
+                            .fileSize(fileInfo.getFileSize())
+                            .isValid(fileInfo.getIsValid())
+                            .actualFields(fileInfo.getActualFields())
+                            .previewData(fileInfo.getPreviewData())
+                            .validRowCount(fileInfo.getValidRowCount())
+                            .dataQuality(fileInfo.getDataQuality())
+                            .encoding(fileInfo.getEncoding())
+                            .qualityInfo(fileInfo.getQualityInfo())
+                            .build();
+                })
+                .collect(Collectors.toList());
     }
 
     /**
@@ -583,6 +801,10 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
 
     // ==================== 私有辅助方法 ====================
 
+    /**
+     * 基础文件属性验证（不读取文件内容）
+     * 这一步只验证文件对象的基本属性，避免消耗输入流
+     */
     private void validateBasicFileProperties(MultipartFile file) {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("上传文件不能为空");
@@ -603,6 +825,32 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
             throw new IllegalArgumentException("文件大小不能超过100MB");
         }
     }
+
+    /**
+     * 立即保存上传文件
+     * 关键改进：文件一旦上传就立即持久化，后续操作都基于文件路径
+     */
+    private String saveUploadedFileImmediately(MultipartFile file, String taskNo) {
+        try {
+            String uploadDir = "/data/drug-import/uploads/";
+            String fileName = taskNo + "_" + file.getOriginalFilename();
+            Path filePath = Paths.get(uploadDir, fileName);
+
+            // 确保目录存在
+            Files.createDirectories(filePath.getParent());
+
+            // 关键步骤：这是唯一一次读取MultipartFile的地方
+            Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+
+            log.info("文件保存成功: taskNo={}, filePath={}, size={}KB",
+                    taskNo, filePath, file.getSize() / 1024);
+
+            return filePath.toString();
+        } catch (IOException e) {
+            throw exception(FILE_UPLOAD_FAILED, "文件保存失败: " + e.getMessage());
+        }
+    }
+
 
     private List<String> identifyMissingFiles(FileExtractResult extractResult) {
         List<String> expectedFiles = Arrays.asList(
@@ -1013,7 +1261,7 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
      * 判断任务是否可以重试
      */
     private boolean canRetryTask(ImportTaskDO task) {
-        TaskStatusEnum status = TaskStatusEnum.valueOf(String.valueOf(task.getStatus()));
+        TaskStatusEnum status = TaskStatusEnum.getByType(task.getStatus());
         return status == TaskStatusEnum.FAILED || status == TaskStatusEnum.PARTIAL_SUCCESS;
     }
 
@@ -1033,8 +1281,7 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
         CompletableFuture.runAsync(() -> {
             try {
                 // 重新读取文件执行导入
-                MultipartFile file = reconstructFileFromPath(task.getFilePath());
-                executeImportProcess(task, file);
+                executeImportProcess(task, task.getFilePath());
             } catch (Exception e) {
                 log.error("全部重试失败: taskId={}", task.getId(), e);
                 handleTaskError(task.getId(), "重试失败: " + e.getMessage());
@@ -1214,16 +1461,6 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
     }
 
     /**
-     * 从文件路径重构MultipartFile对象
-     * 用于重试时重新读取文件
-     */
-    private MultipartFile reconstructFileFromPath(String filePath) {
-        // 这里需要实现从文件路径读取文件并构造MultipartFile的逻辑
-        // 实际实现中可以使用Spring的MockMultipartFile
-        throw new UnsupportedOperationException("需要实现文件重构逻辑");
-    }
-
-    /**
      * 计算预计剩余时间
      * <p>
      * 这是一个业务逻辑方法，基于当前进度估算剩余时间
@@ -1255,7 +1492,7 @@ public class DrugBatchImportServiceImpl implements DrugBatchImportService {
 
                     return TableProgressVO.builder()
                             .tableType(detail.getTableType())
-                            .tableName(getTableDisplayName(TableTypeEnum.valueOf(String.valueOf(detail.getTableType()))))
+                            .tableName(getTableDisplayName(TableTypeEnum.getByType(detail.getTableType())))
                             .status(detail.getStatus())
                             .progress(progressInfo != null ? progressInfo.getProgress() : detail.getProgressPercent())
                             .currentMessage(progressInfo != null ? progressInfo.getMessage() : "")

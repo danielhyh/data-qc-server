@@ -116,7 +116,7 @@ public class DrugStatisticsService {
             Long failedTasks = statusCountMap.getOrDefault(TaskStatusEnum.FAILED.getStatus(), 0L);
             Long partialSuccessTasks = statusCountMap.getOrDefault(TaskStatusEnum.PARTIAL_SUCCESS.getStatus(), 0L);
             Long runningTasks = statusCountMap.entrySet().stream()
-                    .filter(entry -> TaskStatusEnum.valueOf(String.valueOf(entry.getKey())).isProcessing())
+                    .filter(entry -> TaskStatusEnum.getByType(entry.getKey()).isProcessing())
                     .mapToLong(Map.Entry::getValue)
                     .sum();
 

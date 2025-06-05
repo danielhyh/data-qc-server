@@ -14,7 +14,7 @@ import lombok.NoArgsConstructor;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-class TaskLogVO {
+public class TaskLogVO {
     
     /**
      * 任务ID

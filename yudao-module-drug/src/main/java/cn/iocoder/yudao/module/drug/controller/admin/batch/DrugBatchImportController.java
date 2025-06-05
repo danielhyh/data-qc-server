@@ -6,7 +6,6 @@ import cn.iocoder.yudao.framework.common.pojo.PageResult;
 import cn.iocoder.yudao.framework.common.util.object.BeanUtils;
 import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.*;
 import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDO;
-import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDetailDO;
 import cn.iocoder.yudao.module.drug.enums.RetryTypeEnum;
 import cn.iocoder.yudao.module.drug.service.batch.DrugBatchImportService;
 import cn.iocoder.yudao.module.drug.service.batch.DrugStatisticsService;
@@ -64,43 +63,53 @@ public class DrugBatchImportController {
      * 核心业务接口，支持压缩包上传和任务创建
      */
     @PostMapping(value = "/create-task", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    @Operation(summary = "创建药品数据批量导入任务",
-            description = "上传压缩包文件，创建批量导入任务并开始异步处理")
+    @Operation(summary = "创建批量导入任务", description = "创建新的药品数据批量导入任务")
     @PreAuthorize("@ss.hasPermission('drug:batch-import:create')")
-    @ApiAccessLog(operateType = IMPORT)
     public CommonResult<ImportTaskCreateResult> createImportTask(
             @RequestPart("file") MultipartFile file,
             @RequestParam("taskName") String taskName,
-            @RequestParam(value = "description", required = false) String description) {
+            @RequestParam(value = "description", required = false) String description,
+            @RequestParam(value = "dataSource", required = false) String dataSource) {
 
-        log.info("收到批量导入请求: taskName={}, fileName={}, fileSize={}",
-                taskName, file.getOriginalFilename(), file.getSize());
+        log.info("创建导入任务: taskName={}, dataSource={}, fileName={}, fileSize={}",
+                taskName, dataSource, file.getOriginalFilename(), file.getSize());
 
-        ImportTaskCreateResult result = drugBatchImportService.createImportTask(file, taskName, description);
+        // 构建请求参数
+        ImportTaskCreateParams params = ImportTaskCreateParams.builder()
+                .taskName(taskName)
+                .description(description)
+                .dataSource(dataSource)
+                .build();
 
-        log.info("批量导入任务创建成功: taskId={}, taskNo={}",
-                result.getTaskId(), result.getTaskNo());
-
+        ImportTaskCreateResult result = drugBatchImportService.createImportTask(file, params);
         return success(result);
     }
 
     /**
      * 获取任务详细信息
      * <p>
-     * 提供任务的完整状态信息，包括所有明细
+     * 提供任务的完整状态信息，包括所有明细、实时进度、统计分析等
      */
     @GetMapping("/task-detail/{taskId}")
     @Operation(summary = "获取导入任务详细信息")
     @Parameter(name = "taskId", description = "任务ID", required = true)
     @PreAuthorize("@ss.hasPermission('drug:batch-import:query')")
-    public CommonResult<ImportTaskDetailRespVO> getTaskDetail(@PathVariable("taskId") Long taskId) {
+    public CommonResult<ImportTaskDetailVO> getTaskDetail(@PathVariable("taskId") Long taskId) {
 
-        log.debug("查询任务详情: taskId={}", taskId);
+        log.info("查询任务详情: taskId={}", taskId);
 
-        ImportTaskDetailDO taskDetail = drugBatchImportService.getTaskDetail(taskId);
-        ImportTaskDetailRespVO result = BeanUtils.toBean(taskDetail, ImportTaskDetailRespVO.class);
+        try {
+            ImportTaskDetailVO taskDetail = drugBatchImportService.getTaskDetail(taskId);
 
-        return success(result);
+            log.info("任务详情查询成功: taskId={}, taskNo={}",
+                    taskId, taskDetail.getTaskInfo().getTaskNo());
+
+            return success(taskDetail);
+
+        } catch (Exception e) {
+            log.error("查询任务详情失败: taskId={}", taskId, e);
+            throw e;
+        }
     }
 
     /**
@@ -217,7 +226,6 @@ public class DrugBatchImportController {
                 file.getOriginalFilename(), file.getSize());
 
         FileValidationResult result = drugBatchImportService.validateImportFile(file);
-
         return success(result);
     }
 

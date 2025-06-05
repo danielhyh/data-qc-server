@@ -1,5 +1,6 @@
 package cn.iocoder.yudao.module.drug.enums;
 
+import cn.hutool.core.util.ArrayUtil;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 
@@ -18,6 +19,13 @@ public enum TaskStatusEnum {
     
     private final Integer status;
     private final String description;
+
+    /**
+     * 根据类型获取枚举
+     */
+    public static TaskStatusEnum getByType(Integer type) {
+        return ArrayUtil.firstMatch(taskEnum -> taskEnum.getStatus().equals(type), values());
+    }
     
     /**
      * 判断是否为进行中状态
