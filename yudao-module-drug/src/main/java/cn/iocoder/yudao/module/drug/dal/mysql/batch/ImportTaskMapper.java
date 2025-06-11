@@ -19,7 +19,6 @@ public interface ImportTaskMapper extends BaseMapperX<ImportTaskDO> {
         return selectPage(reqVO, new LambdaQueryWrapperX<ImportTaskDO>()
                 .eqIfPresent(ImportTaskDO::getTaskNo, reqVO.getTaskNo())
                 .likeIfPresent(ImportTaskDO::getTaskName, reqVO.getTaskName())
-                .eqIfPresent(ImportTaskDO::getImportType, reqVO.getImportType())
                 .likeIfPresent(ImportTaskDO::getFileName, reqVO.getFileName())
                 .eqIfPresent(ImportTaskDO::getFilePath, reqVO.getFilePath())
                 .eqIfPresent(ImportTaskDO::getFileSize, reqVO.getFileSize())

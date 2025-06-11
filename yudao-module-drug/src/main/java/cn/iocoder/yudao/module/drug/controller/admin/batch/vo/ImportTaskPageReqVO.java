@@ -20,9 +20,6 @@ public class ImportTaskPageReqVO extends PageParam {
     @Schema(description = "任务名称", example = "王五")
     private String taskName;
 
-    @Schema(description = "导入类型:1-单文件,2-压缩包", example = "1")
-    private Integer importType;
-
     @Schema(description = "原始文件名称", example = "李四")
     private String fileName;
 

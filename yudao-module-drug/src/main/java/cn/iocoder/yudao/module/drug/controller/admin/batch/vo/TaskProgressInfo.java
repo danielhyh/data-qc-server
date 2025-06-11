@@ -27,7 +27,7 @@ public class TaskProgressInfo {
     
     /**
      * 当前进度百分比
-     * -1 表示执行失败
+     * 0 表示执行失败
      */
     private int progress;
     

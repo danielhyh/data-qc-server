@@ -2,8 +2,10 @@ package cn.iocoder.yudao.module.drug.controller.admin.batch;
 
 import cn.iocoder.yudao.framework.apilog.core.annotation.ApiAccessLog;
 import cn.iocoder.yudao.framework.common.pojo.CommonResult;
+import cn.iocoder.yudao.framework.common.pojo.PageParam;
 import cn.iocoder.yudao.framework.common.pojo.PageResult;
 import cn.iocoder.yudao.framework.common.util.object.BeanUtils;
+import cn.iocoder.yudao.framework.excel.core.util.ExcelUtils;
 import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.*;
 import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDO;
 import cn.iocoder.yudao.module.drug.enums.RetryTypeEnum;
@@ -24,6 +26,9 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static cn.iocoder.yudao.framework.apilog.core.enums.OperateTypeEnum.*;
 import static cn.iocoder.yudao.framework.common.pojo.CommonResult.success;
@@ -202,13 +207,12 @@ public class DrugBatchImportController {
             description = "下载包含所有必需文件的标准导入模板")
     @PreAuthorize("@ss.hasPermission('drug:batch-import:template')")
     @ApiAccessLog(operateType = EXPORT)
-    public void downloadTemplate(
-            @RequestParam(value = "templateType", defaultValue = "STANDARD") String templateType,
-            HttpServletResponse response) throws IOException {
+    public void downloadTemplate(HttpServletResponse response) throws IOException {
+        String downloadUrl = "http://cdn.fangliyun.com/drug-data-guard-suite/药品数据导入模板_2024.zip";
+        String encodedUrl = URLEncoder.encode(downloadUrl, StandardCharsets.UTF_8)
+                .replace("+", "%20"); // 处理空格编码
 
-        log.info("请求下载导入模板: templateType={}", templateType);
-
-        drugTemplateService.downloadTemplate(templateType, response);
+        response.sendRedirect(encodedUrl);
     }
 
     /**
@@ -258,10 +262,11 @@ public class DrugBatchImportController {
     @PreAuthorize("@ss.hasPermission('drug:batch-import:export')")
     @ApiAccessLog(operateType = EXPORT)
     public void exportTaskList(@Valid ImportTaskPageReqVO pageReqVO, HttpServletResponse response) throws IOException {
-
-        log.info("导出任务列表: params={}", pageReqVO);
-
-        drugBatchImportService.exportTaskList(pageReqVO, response);
+        pageReqVO.setPageSize(PageParam.PAGE_SIZE_NONE);
+        List<ImportTaskDO> list = drugBatchImportService.getTaskPage(pageReqVO).getList();
+        // 导出 Excel
+        ExcelUtils.write(response, "药品数据导入任务.xls", "数据", ImportTaskRespVO.class,
+                BeanUtils.toBean(list, ImportTaskRespVO.class));
     }
 
     /**

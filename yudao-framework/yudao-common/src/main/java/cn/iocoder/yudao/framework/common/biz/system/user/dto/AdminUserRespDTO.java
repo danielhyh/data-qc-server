@@ -1,4 +1,4 @@
-package cn.iocoder.yudao.module.system.api.user.dto;
+package cn.iocoder.yudao.framework.common.biz.system.user.dto;
 
 import cn.iocoder.yudao.framework.common.enums.CommonStatusEnum;
 import lombok.Data;

@@ -1,15 +1,24 @@
-package cn.iocoder.yudao.module.drug.controller.admin.batch.vo;
+package cn.iocoder.yudao.module.drug.controller.admin.batch.vo;// ==================== 9. 重构后的主要详情VO ====================
 
+import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
 import java.util.List;
 
 /**
- * 任务详情返回对象
+ * 导入任务详情VO - 重构版
+ * <p>
+ * 重构说明：
+ * 1. 保持原有的字段结构，确保向后兼容
+ * 2. 整合了多个相关VO的功能
+ * 3. 提供了更清晰的数据组织结构
  */
 @Data
 @Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class ImportTaskDetailVO {
     
     /**

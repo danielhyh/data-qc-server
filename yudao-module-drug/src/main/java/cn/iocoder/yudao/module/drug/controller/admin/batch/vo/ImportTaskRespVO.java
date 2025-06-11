@@ -25,10 +25,6 @@ public class ImportTaskRespVO {
     @ExcelProperty("任务名称")
     private String taskName;
 
-    @Schema(description = "导入类型:1-单文件,2-压缩包", requiredMode = Schema.RequiredMode.REQUIRED, example = "1")
-    @ExcelProperty("导入类型:1-单文件,2-压缩包")
-    private Integer importType;
-
     @Schema(description = "原始文件名称", requiredMode = Schema.RequiredMode.REQUIRED, example = "李四")
     @ExcelProperty("原始文件名称")
     private String fileName;
@@ -120,6 +116,10 @@ public class ImportTaskRespVO {
     @Schema(description = "详细错误信息(JSON格式)")
     @ExcelProperty("详细错误信息(JSON格式)")
     private String errorDetail;
+
+    @Schema(description = "创建人", requiredMode = Schema.RequiredMode.REQUIRED, example = "666")
+    @ExcelProperty("创建人")
+    private String creator;
 
     @Schema(description = "创建时间", requiredMode = Schema.RequiredMode.REQUIRED)
     @ExcelProperty("创建时间")

@@ -6,6 +6,8 @@ import cn.iocoder.yudao.module.drug.dal.mysql.batch.ImportTaskMapper;
 import cn.iocoder.yudao.module.drug.enums.TaskStatusEnum;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import jakarta.annotation.Resource;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -264,6 +266,8 @@ public class DrugStatisticsService {
     }
 
     // 内部统计数据类
+    @Getter
+    @AllArgsConstructor
     private static class TaskCountStatistics {
         private final Integer totalTasks;
         private final Integer successTasks;
@@ -271,82 +275,19 @@ public class DrugStatisticsService {
         private final Integer partialSuccessTasks;
         private final Integer runningTasks;
         private final Double successRate;
-
-        public TaskCountStatistics(Integer totalTasks, Integer successTasks, Integer failedTasks,
-                                   Integer partialSuccessTasks, Integer runningTasks, Double successRate) {
-            this.totalTasks = totalTasks;
-            this.successTasks = successTasks;
-            this.failedTasks = failedTasks;
-            this.partialSuccessTasks = partialSuccessTasks;
-            this.runningTasks = runningTasks;
-            this.successRate = successRate;
-        }
-
-        // Getters
-        public Integer getTotalTasks() {
-            return totalTasks;
-        }
-
-        public Integer getSuccessTasks() {
-            return successTasks;
-        }
-
-        public Integer getFailedTasks() {
-            return failedTasks;
-        }
-
-        public Integer getPartialSuccessTasks() {
-            return partialSuccessTasks;
-        }
-
-        public Integer getRunningTasks() {
-            return runningTasks;
-        }
-
-        public Double getSuccessRate() {
-            return successRate;
-        }
     }
 
+    @Getter
+    @AllArgsConstructor
     private static class ProcessingStatistics {
         private final Integer averageProcessingTime;
         private final Long totalRecordsProcessed;
-
-        public ProcessingStatistics(Integer averageProcessingTime, Long totalRecordsProcessed) {
-            this.averageProcessingTime = averageProcessingTime;
-            this.totalRecordsProcessed = totalRecordsProcessed;
-        }
-
-        public Integer getAverageProcessingTime() {
-            return averageProcessingTime;
-        }
-
-        public Long getTotalRecordsProcessed() {
-            return totalRecordsProcessed;
-        }
     }
-
+    @Getter
+    @AllArgsConstructor
     private static class TrendStatistics {
         private final Integer todayTasks;
         private final Integer yesterdayTasks;
         private final Double taskGrowthRate;
-
-        public TrendStatistics(Integer todayTasks, Integer yesterdayTasks, Double taskGrowthRate) {
-            this.todayTasks = todayTasks;
-            this.yesterdayTasks = yesterdayTasks;
-            this.taskGrowthRate = taskGrowthRate;
-        }
-
-        public Integer getTodayTasks() {
-            return todayTasks;
-        }
-
-        public Integer getYesterdayTasks() {
-            return yesterdayTasks;
-        }
-
-        public Double getTaskGrowthRate() {
-            return taskGrowthRate;
-        }
     }
 }

@@ -31,11 +31,6 @@ public class ImportTaskDetailRespVO {
      */
     private String taskName;
 
-    /**
-     * 导入类型
-     */
-    private Integer importType;
-
     @Schema(description = "文件类型:HOSPITAL_INFO,DRUG_CATALOG,DRUG_INBOUND,DRUG_OUTBOUND,DRUG_USAGE", requiredMode = Schema.RequiredMode.REQUIRED, example = "2")
     @ExcelProperty("文件类型:HOSPITAL_INFO,DRUG_CATALOG,DRUG_INBOUND,DRUG_OUTBOUND,DRUG_USAGE")
     private String fileType;

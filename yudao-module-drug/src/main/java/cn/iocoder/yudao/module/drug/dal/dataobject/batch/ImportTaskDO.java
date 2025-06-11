@@ -37,10 +37,6 @@ public class ImportTaskDO extends BaseDO {
      */
     private String taskName;
     /**
-     * 导入类型:1-单文件,2-压缩包
-     */
-    private Integer importType;
-    /**
      * 原始文件名称
      */
     private String fileName;
@@ -132,6 +128,13 @@ public class ImportTaskDO extends BaseDO {
      * 详细错误信息(JSON格式)
      */
     private String errorDetail;
-
+    /**
+     * 数据来源
+     */
+    private String dataSource;
+    /**
+     * 备注说明
+     */
+    private String description;
 
 }

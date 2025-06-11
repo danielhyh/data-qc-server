@@ -1,0 +1,1781 @@
+//package cn.iocoder.yudao.module.drug.service.batch;
+//
+//import cn.iocoder.yudao.framework.common.pojo.PageResult;
+//import cn.iocoder.yudao.framework.security.core.util.SecurityFrameworkUtils;
+//import cn.iocoder.yudao.module.drug.controller.admin.batch.vo.*;
+//import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDO;
+//import cn.iocoder.yudao.module.drug.dal.dataobject.batch.ImportTaskDetailDO;
+//import cn.iocoder.yudao.module.drug.dal.mysql.batch.ImportTaskDetailMapper;
+//import cn.iocoder.yudao.module.drug.dal.mysql.batch.ImportTaskMapper;
+//import cn.iocoder.yudao.module.drug.dal.redis.batch.TaskProgressRedisDAO;
+//import cn.iocoder.yudao.module.drug.enums.DetailStatusEnum;
+//import cn.iocoder.yudao.module.drug.enums.RetryTypeEnum;
+//import cn.iocoder.yudao.module.drug.enums.TableTypeEnum;
+//import cn.iocoder.yudao.module.drug.enums.TaskStatusEnum;
+//import com.alibaba.excel.EasyExcel;
+//import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+//import jakarta.annotation.Resource;
+//import jakarta.servlet.ServletOutputStream;
+//import jakarta.servlet.http.HttpServletResponse;
+//import lombok.extern.slf4j.Slf4j;
+//import org.springframework.beans.factory.annotation.Qualifier;
+//import org.springframework.core.task.AsyncTaskExecutor;
+//import org.springframework.stereotype.Service;
+//import org.springframework.transaction.annotation.Transactional;
+//import org.springframework.util.StringUtils;
+//import org.springframework.validation.annotation.Validated;
+//import org.springframework.web.multipart.MultipartFile;
+//
+//import java.io.IOException;
+//import java.net.URLEncoder;
+//import java.nio.charset.StandardCharsets;
+//import java.nio.file.Files;
+//import java.nio.file.Path;
+//import java.nio.file.Paths;
+//import java.nio.file.StandardCopyOption;
+//import java.time.Duration;
+//import java.time.LocalDateTime;
+//import java.time.format.DateTimeFormatter;
+//import java.util.Arrays;
+//import java.util.Collections;
+//import java.util.List;
+//import java.util.Map;
+//import java.util.concurrent.CompletableFuture;
+//import java.util.stream.Collectors;
+//
+//import static cn.iocoder.yudao.framework.common.exception.util.ServiceExceptionUtil.exception;
+//import static cn.iocoder.yudao.module.drug.enums.DrugErrorCodeConstants.*;
+//
+///**
+// * 药品数据批量导入服务实现 - 修复版
+// * <p>
+// * 本次修复主要解决了以下问题：
+// * 1. 将任务编号生成职责移到Redis DAO层，体现职责分离原则
+// * 2. 修复了状态检查的逻辑错误
+// * 3. 优化了文件验证逻辑，增强健壮性
+// * 4. 完善了异常处理和日志记录
+// * <p>
+// * 设计理念保持不变：
+// * - 统一的任务管理：所有导入操作都通过任务来管理
+// * - 分阶段处理：解压 -> 解析 -> 导入 -> 质控
+// * - 智能重试：支持精确重试
+// * - 实时进度：提供多层次的进度反馈
+// *
+// * @author yourname
+// * @since 2024-05-29
+// */
+//@Service
+//@Slf4j
+//@Validated
+//public class DrugBatchImportServiceImplV2 implements DrugBatchImportService {
+//
+//    // 导入顺序（考虑数据依赖关系）
+//    private static final List<TableTypeEnum> IMPORT_ORDER = List.of(
+//            TableTypeEnum.HOSPITAL_INFO,    // 机构信息必须最先导入
+//            TableTypeEnum.DRUG_CATALOG,     // 药品目录其次
+//            TableTypeEnum.DRUG_INBOUND,     // 入库、出库、使用可以并行
+//            TableTypeEnum.DRUG_OUTBOUND,
+//            TableTypeEnum.DRUG_USAGE
+//    );
+//
+//    @Resource
+//    private ImportTaskMapper taskMapper;
+//    @Resource
+//    private ImportTaskDetailMapper taskDetailMapper;
+//    @Resource
+//    private FileExtractService fileExtractService;
+//    @Resource
+//    private ImportTaskDetailService taskDetailService;
+//    @Resource
+//    private DrugDataParseService dataParseService;
+//    @Resource
+//    private DrugDataImportService dataImportService;
+//    @Resource
+//    private DrugQualityControlService qualityControlService;
+//    @Resource
+//    @Qualifier("applicationTaskExecutor")
+//    private AsyncTaskExecutor asyncTaskExecutor;
+//    @Resource
+//    private TaskProgressRedisDAO taskProgressRedisDAO;
+//
+//    @Override
+//    @Transactional(rollbackFor = Exception.class)
+//    public ImportTaskCreateResult createImportTask(MultipartFile file, ImportTaskCreateParams params) {
+//        // 1. 基础文件验证（不读取内容，只检查基本属性）
+//        validateBasicFileProperties(file);
+//
+//        // 2. 立即保存文件到持久化存储
+//        String taskNo = taskProgressRedisDAO.generateTaskNo();
+//        String savedFilePath = saveUploadedFileImmediately(file, taskNo);
+//
+//        // 3. 创建任务记录
+//        ImportTaskDO task = createTaskRecord(file, params.getTaskName());
+//
+//        // 4. 异步执行完整的文件处理流程
+//        CompletableFuture.runAsync(() -> {
+//            try {
+//                // 现在基于文件路径进行处理，避免MultipartFile重复读取
+//                executeImportProcess(task, savedFilePath);
+//            } catch (Exception e) {
+//                log.error("导入任务执行失败: taskId={}", task.getId(), e);
+//                handleTaskError(task.getId(), "导入过程异常: " + e.getMessage());
+//            }
+//        }, asyncTaskExecutor);
+//
+//        return ImportTaskCreateResult.builder()
+//                .taskId(task.getId())
+//                .taskNo(task.getTaskNo())
+//                .message("导入任务已创建，正在后台处理")
+//                .build();
+//    }
+//
+//    /**
+//     * 获取任务完整详情
+//     * 包含任务基本信息、所有明细、实时进度、统计信息等
+//     */
+//    @Override
+//    public ImportTaskDetailVO getTaskDetail(Long taskId) {
+//        // 1. 查询任务基本信息
+//        ImportTaskDO task = taskMapper.selectById(taskId);
+//        if (task == null) {
+//            throw exception(TASK_NOT_FOUND);
+//        }
+//
+//        // 2. 查询所有任务明细
+//        List<ImportTaskDetailDO> taskDetails = taskDetailMapper.selectList(
+//                new LambdaQueryWrapper<ImportTaskDetailDO>()
+//                        .eq(ImportTaskDetailDO::getTaskId, taskId)
+//                        .orderByAsc(ImportTaskDetailDO::getCreateTime)
+//        );
+//
+//        // 3. 获取实时进度信息
+//        TaskProgressInfo progressInfo = taskProgressRedisDAO.getTaskProgress(taskId);
+//        Map<String, TaskDetailProgressInfo> detailProgressMap =
+//                taskProgressRedisDAO.getAllTaskDetailProgress(taskId);
+//
+//        // 4. 计算统计信息
+//        TaskStatisticsVO statistics = calculateTaskStatistics(task, taskDetails);
+//
+//        // 5. 获取任务执行日志（最近的100条）
+//        List<TaskLogVO> recentLogs = getRecentTaskLogs(taskId, 100);
+//
+//        // 6. 获取相关任务信息（同一批次或相似任务）
+//        List<RelatedTaskVO> relatedTasks = findRelatedTasks(task);
+//
+//        // 7. 构建完整的详情对象
+//        return ImportTaskDetailVO.builder()
+//                .taskInfo(convertToTaskInfo(task))
+//                .overallProgress(buildOverallProgress(task, progressInfo))
+//                .tableDetails(buildTableDetails(taskDetails, detailProgressMap))
+//                .statistics(statistics)
+//                .timeline(buildTaskTimeline(task, taskDetails))
+//                .recentLogs(recentLogs)
+//                .relatedTasks(relatedTasks)
+//                .operationOptions(buildOperationOptions(task))
+//                .qualityReport(buildQualityReport(taskId))
+//                .build();
+//    }
+//
+//    /**
+//     * 计算任务统计信息
+//     */
+//    private TaskStatisticsVO calculateTaskStatistics(ImportTaskDO task, List<ImportTaskDetailDO> details) {
+//        return TaskStatisticsVO.builder()
+//                .totalFiles(task.getTotalFiles())
+//                .successFiles(task.getSuccessFiles())
+//                .failedFiles(task.getFailedFiles())
+//                .totalRecords(task.getTotalRecords())
+//                .successRecords(task.getSuccessRecords())
+//                .failedRecords(task.getFailedRecords())
+//                .overallSuccessRate(calculateSuccessRate(task.getSuccessRecords(), task.getTotalRecords()))
+//                .averageProcessingSpeed(calculateProcessingSpeed(task, details))
+//                .estimatedTimeRemaining(calculateEstimatedTimeRemaining(task))
+//                .fileSuccessRateByType(calculateFileSuccessRateByType(details))
+//                .recordSuccessRateByType(calculateRecordSuccessRateByType(details))
+//                .qualityScoreDistribution(calculateQualityScoreDistribution(details))
+//                .build();
+//    }
+//
+//    /**
+//     * 构建任务时间线
+//     */
+//    private List<TaskTimelineVO> buildTaskTimeline(ImportTaskDO task, List<ImportTaskDetailDO> details) {
+//        List<TaskTimelineVO> timeline = new ArrayList<>();
+//
+//        // 添加主要任务节点
+//        if (task.getCreateTime() != null) {
+//            timeline.add(TaskTimelineVO.builder()
+//                    .timestamp(task.getCreateTime())
+//                    .event("TASK_CREATED")
+//                    .title("任务创建")
+//                    .description("任务已创建，等待处理")
+//                    .type("info")
+//                    .build());
+//        }
+//
+//        if (task.getStartTime() != null) {
+//            timeline.add(TaskTimelineVO.builder()
+//                    .timestamp(task.getStartTime())
+//                    .event("TASK_STARTED")
+//                    .title("开始处理")
+//                    .description("任务开始执行")
+//                    .type("primary")
+//                    .build());
+//        }
+//
+//        // 添加各阶段完成节点
+//        addStageTimeline(timeline, task, "EXTRACT", task.getExtractEndTime(), "文件解压完成");
+//        addStageTimeline(timeline, task, "IMPORT", task.getImportEndTime(), "数据导入完成");
+//        addStageTimeline(timeline, task, "QC", task.getQcEndTime(), "质控检查完成");
+//
+//        if (task.getEndTime() != null) {
+//            timeline.add(TaskTimelineVO.builder()
+//                    .timestamp(task.getEndTime())
+//                    .event("TASK_COMPLETED")
+//                    .title("任务完成")
+//                    .description(getTaskCompletionDescription(task))
+//                    .type(getTaskCompletionType(task))
+//                    .build());
+//        }
+//
+//        // 添加表级别的关键事件
+//        details.forEach(detail -> addDetailTimeline(timeline, detail));
+//
+//        // 按时间排序
+//        timeline.sort(Comparator.comparing(TaskTimelineVO::getTimestamp));
+//
+//        return timeline;
+//    }
+//
+//    /**
+//     * 构建操作选项
+//     */
+//    private TaskOperationOptionsVO buildOperationOptions(ImportTaskDO task) {
+//        TaskStatusEnum status = TaskStatusEnum.getByType(task.getStatus());
+//
+//        return TaskOperationOptionsVO.builder()
+//                .canRetry(canRetryTask(task))
+//                .canCancel(canCancelTask(task))
+//                .canDownloadReport(status == TaskStatusEnum.COMPLETED || status == TaskStatusEnum.PARTIAL_SUCCESS)
+//                .canViewLogs(true)
+//                .canExportData(status == TaskStatusEnum.COMPLETED)
+//                .availableRetryTypes(getAvailableRetryTypes(task))
+//                .estimatedRetryDuration(calculateEstimatedRetryDuration(task))
+//                .build();
+//    }
+//
+//    /**
+//     * 构建质量报告
+//     */
+//    private TaskQualityReportVO buildQualityReport(Long taskId) {
+//        // 从质控服务获取详细的质量报告
+//        QualityControlResult qcResult = qualityControlService.getDetailedQualityReport(taskId);
+//
+//        return TaskQualityReportVO.builder()
+//                .overallQualityScore(qcResult.getOverallScore())
+//                .dataIntegrityScore(qcResult.getDataIntegrityScore())
+//                .consistencyScore(qcResult.getConsistencyScore())
+//                .completenessScore(qcResult.getCompletenessScore())
+//                .qualityIssues(qcResult.getQualityIssues())
+//                .recommendations(qcResult.getRecommendations())
+//                .detailedMetrics(qcResult.getDetailedMetrics())
+//                .build();
+//    }
+//
+//    /**
+//     * DrugBatchImportServiceImpl中的构建方法实现
+//     * <p>
+//     * 这些方法展示了如何将数据库实体转换为前端需要的VO对象
+//     * 体现了"数据转换"这一关键的架构层次
+//     */
+//
+//    /**
+//     * 构建任务基本信息
+//     * <p>
+//     * 设计理念：将数据库实体中的基础字段提取出来，
+//     * 形成前端展示所需的核心信息
+//     */
+//    private TaskInfoVO convertToTaskInfo(ImportTaskDO task) {
+//        return TaskInfoVO.builder()
+//                .taskId(task.getId())
+//                .taskNo(task.getTaskNo())
+//                .taskName(task.getTaskName())
+//                .fileName(task.getFileName())
+//                .fileSize(task.getFileSize())
+//                .status(task.getStatus())
+//                .statusDisplay(TaskStatusEnum.getByType(task.getStatus()).getDescription())
+//                .createTime(task.getCreateTime())
+//                .creator(task.getCreator())
+//                .build();
+//    }
+//
+//    /**
+//     * 构建整体进度信息
+//     * <p>
+//     * 设计思路：整合数据库状态和Redis缓存进度，
+//     * 提供完整的进度视图
+//     */
+//    private TaskOverallProgressVO buildOverallProgress(ImportTaskDO task, TaskProgressInfo progressInfo) {
+//        // 构建阶段状态信息
+//        TaskOverallProgressVO.StageStatusInfo stageStatus = TaskOverallProgressVO.StageStatusInfo.builder()
+//                .extractStatus(task.getExtractStatus())
+//                .importStatus(task.getImportStatus())
+//                .qcStatus(task.getQcStatus())
+//                .build();
+//
+//        // 构建时间信息
+//        TaskOverallProgressVO.TimeInfo timeInfo = TaskOverallProgressVO.TimeInfo.builder()
+//                .startTime(task.getStartTime())
+//                .estimatedEndTime(calculateEstimatedEndTime(task, null)) // 复用已有方法
+//                .lastUpdateTime(progressInfo != null ? progressInfo.getUpdateTime() : LocalDateTime.now())
+//                .elapsedSeconds(calculateElapsedSeconds(task.getStartTime()))
+//                .build();
+//
+//        // 构建预估信息
+//        TaskOverallProgressVO.EstimationInfo estimation = TaskOverallProgressVO.EstimationInfo.builder()
+//                .estimatedRemainingSeconds(progressInfo != null ? progressInfo.getEstimatedRemainingSeconds() : null)
+//                .processingSpeed(calculateCurrentProcessingSpeed(task))
+//                .speedDisplay(formatProcessingSpeed(calculateCurrentProcessingSpeed(task)))
+//                .build();
+//
+//        return TaskOverallProgressVO.builder()
+//                .overallProgress(progressInfo != null ? progressInfo.getProgress() : task.getProgressPercent())
+//                .currentStage(progressInfo != null ? progressInfo.getCurrentStage() : getCurrentStageFromStatus(task.getStatus()))
+//                .currentMessage(progressInfo != null ? progressInfo.getMessage() : "")
+//                .stageStatus(stageStatus)
+//                .timeInfo(timeInfo)
+//                .estimation(estimation)
+//                .build();
+//    }
+//
+//    /**
+//     * 构建表级详情列表
+//     * <p>
+//     * 关键设计：将数据库的任务明细和Redis的实时进度有机结合，
+//     * 为每个表提供完整的状态视图
+//     */
+//    private List<TableDetailVO> buildTableDetails(
+//            List<ImportTaskDetailDO> taskDetails,
+//            Map<String, TaskDetailProgressInfo> detailProgressMap) {
+//
+//        return taskDetails.stream()
+//                .map(detail -> {
+//                    String tableTypeKey = String.valueOf(detail.getTableType());
+//                    TaskDetailProgressInfo progressInfo = detailProgressMap.get(tableTypeKey);
+//
+//                    // 构建表基本信息
+//                    TableDetailVO.TableBasicInfo basicInfo = TableDetailVO.TableBasicInfo.builder()
+//                            .tableType(detail.getTableType())
+//                            .tableName(TableTypeEnum.getByType(detail.getTableType()).getDescription())
+//                            .fileName(detail.getFileName())
+//                            .fileType(detail.getFileType())
+//                            .fileSize(0L) // 可以从文件信息中获取
+//                            .build();
+//
+//                    // 构建进度信息 - 优先使用Redis中的实时数据
+//                    TableDetailVO.TableProgressInfo progressVOInfo = TableDetailVO.TableProgressInfo.builder()
+//                            .status(detail.getStatus())
+//                            .statusDisplay(DetailStatusEnum.getByType(detail.getStatus()).getDescription())
+//                            .progressPercent(progressInfo != null ? progressInfo.getProgress() : detail.getProgressPercent())
+//                            .currentMessage(progressInfo != null ? progressInfo.getMessage() : "")
+//                            .parseStatus(detail.getParseStatus())
+//                            .importStatus(detail.getImportStatus())
+//                            .qcStatus(detail.getQcStatus())
+//                            .build();
+//
+//                    // 构建统计信息
+//                    TableDetailVO.TableStatisticsInfo statisticsInfo = TableDetailVO.TableStatisticsInfo.builder()
+//                            .totalRows(detail.getTotalRows())
+//                            .validRows(detail.getValidRows())
+//                            .successRows(detail.getSuccessRows())
+//                            .failedRows(detail.getFailedRows())
+//                            .qcPassedRows(detail.getQcPassedRows())
+//                            .qcFailedRows(detail.getQcFailedRows())
+//                            .successRate(calculateTableSuccessRate(detail.getSuccessRows(), detail.getTotalRows()))
+//                            .build();
+//
+//                    // 构建操作信息
+//                    TableDetailVO.TableOperationInfo operationInfo = TableDetailVO.TableOperationInfo.builder()
+//                            .canRetry(detail.getStatus().equals(DetailStatusEnum.FAILED.getStatus()))
+//                            .retryCount(detail.getRetryCount())
+//                            .maxRetryCount(detail.getMaxRetryCount())
+//                            .startTime(detail.getStartTime())
+//                            .endTime(detail.getEndTime())
+//                            .errorMessage(detail.getErrorMessage())
+//                            .build();
+//
+//                    return TableDetailVO.builder()
+//                            .basicInfo(basicInfo)
+//                            .progressInfo(progressVOInfo)
+//                            .statisticsInfo(statisticsInfo)
+//                            .operationInfo(operationInfo)
+//                            .build();
+//                })
+//                .collect(Collectors.toList());
+//    }
+//
+//    /**
+//     * 构建统计信息
+//     * <p>
+//     * 设计亮点：从四个维度提供统计分析，
+//     * 每个维度都有独立的计算逻辑和业务意义
+//     */
+//    private TaskStatisticsVO calculateTaskStatistics(ImportTaskDO task, List<ImportTaskDetailDO> details) {
+//        // 文件统计
+//        TaskStatisticsVO.FileStatistics fileStats = TaskStatisticsVO.FileStatistics.builder()
+//                .totalFiles(task.getTotalFiles())
+//                .successFiles(task.getSuccessFiles())
+//                .failedFiles(task.getFailedFiles())
+//                .fileSuccessRate(calculateSuccessRate(task.getSuccessFiles(), task.getTotalFiles()))
+//                .fileCountByType(calculateFileCountByType(details))
+//                .build();
+//
+//        // 记录统计
+//        TaskStatisticsVO.RecordStatistics recordStats = TaskStatisticsVO.RecordStatistics.builder()
+//                .totalRecords(task.getTotalRecords())
+//                .successRecords(task.getSuccessRecords())
+//                .failedRecords(task.getFailedRecords())
+//                .overallSuccessRate(calculateSuccessRate(task.getSuccessRecords(), task.getTotalRecords()))
+//                .recordCountByType(calculateRecordCountByType(details))
+//                .build();
+//
+//        // 性能统计
+//        TaskStatisticsVO.PerformanceStatistics performanceStats = TaskStatisticsVO.PerformanceStatistics.builder()
+//                .averageProcessingSpeed(calculateAverageProcessingSpeed(task, details))
+//                .estimatedTimeRemaining(calculateEstimatedTimeRemaining(task))
+//                .averageProcessingTime(calculateAverageProcessingTime(task, details))
+//                .performanceLevel(evaluatePerformanceLevel(task, details))
+//                .build();
+//
+//        // 质量统计 - 这里展示了如何复用已有的质控结果
+//        TaskStatisticsVO.QualityStatistics qualityStats = TaskStatisticsVO.QualityStatistics.builder()
+//                .fileSuccessRateByType(calculateFileSuccessRateByType(details))
+//                .recordSuccessRateByType(calculateRecordSuccessRateByType(details))
+//                .qualityScoreDistribution(calculateQualityScoreDistribution(details))
+//                .averageQualityScore(calculateAverageQualityScore(details))
+//                .build();
+//
+//        return TaskStatisticsVO.builder()
+//                .fileStats(fileStats)
+//                .recordStats(recordStats)
+//                .performanceStats(performanceStats)
+//                .qualityStats(qualityStats)
+//                .build();
+//    }
+//
+//    /**
+//     * 构建相关任务列表
+//     * <p>
+//     * 业务逻辑：通过任务名称、创建时间等维度寻找相关任务，
+//     * 为用户提供上下文信息
+//     */
+//    private List<RelatedTaskVO> findRelatedTasks(ImportTaskDO currentTask) {
+//        List<RelatedTaskVO> relatedTasks = new ArrayList<>();
+//
+//        // 查找同一批次的任务（根据任务名称相似度）
+//        List<ImportTaskDO> sameBatchTasks = findSameBatchTasks(currentTask);
+//        sameBatchTasks.forEach(task -> {
+//            if (!task.getId().equals(currentTask.getId())) {
+//                relatedTasks.add(RelatedTaskVO.builder()
+//                        .taskId(task.getId())
+//                        .taskNo(task.getTaskNo())
+//                        .taskName(task.getTaskName())
+//                        .relationType("SAME_BATCH")
+//                        .relationDescription("同批次任务")
+//                        .status(task.getStatus())
+//                        .statusDisplay(TaskStatusEnum.getByType(task.getStatus()).getDescription())
+//                        .createTime(task.getCreateTime())
+//                        .build());
+//            }
+//        });
+//
+//        // 查找重试关系的任务
+//        List<ImportTaskDO> retryRelatedTasks = findRetryRelatedTasks(currentTask);
+//        retryRelatedTasks.forEach(task -> {
+//            relatedTasks.add(RelatedTaskVO.builder()
+//                    .taskId(task.getId())
+//                    .taskNo(task.getTaskNo())
+//                    .taskName(task.getTaskName())
+//                    .relationType(task.getCreateTime().isBefore(currentTask.getCreateTime()) ? "RETRY_OF" : "RETRIED_BY")
+//                    .relationDescription(task.getCreateTime().isBefore(currentTask.getCreateTime()) ? "重试来源" : "重试任务")
+//                    .status(task.getStatus())
+//                    .statusDisplay(TaskStatusEnum.getByType(task.getStatus()).getDescription())
+//                    .createTime(task.getCreateTime())
+//                    .build());
+//        });
+//
+//        return relatedTasks;
+//    }
+//
+//// ==================== 辅助计算方法 ====================
+//
+//    /**
+//     * 计算成功率的通用方法
+//     */
+//    private Double calculateSuccessRate(Number success, Number total) {
+//        if (total == null || total.longValue() == 0) {
+//            return 0.0;
+//        }
+//        return BigDecimal.valueOf(success.doubleValue() * 100.0 / total.doubleValue())
+//                .setScale(2, RoundingMode.HALF_UP)
+//                .doubleValue();
+//    }
+//
+//    /**
+//     * 计算表的成功率
+//     */
+//    private Double calculateTableSuccessRate(Long successRows, Long totalRows) {
+//        return calculateSuccessRate(successRows, totalRows);
+//    }
+//
+//    /**
+//     * 计算已用时间
+//     */
+//    private Long calculateElapsedSeconds(LocalDateTime startTime) {
+//        if (startTime == null) {
+//            return 0L;
+//        }
+//        return Duration.between(startTime, LocalDateTime.now()).getSeconds();
+//    }
+//
+//    /**
+//     * 根据任务状态获取当前阶段
+//     */
+//    private String getCurrentStageFromStatus(Integer status) {
+//        TaskStatusEnum statusEnum = TaskStatusEnum.getByType(status);
+//        return switch (statusEnum) {
+//            case PENDING -> "WAITING";
+//            case EXTRACTING -> "EXTRACTING";
+//            case IMPORTING -> "IMPORTING";
+//            case QC_CHECKING -> "QC_CHECKING";
+//            case COMPLETED, FAILED, PARTIAL_SUCCESS -> "COMPLETED";
+//            case CANCELLED -> "CANCELLED";
+//        };
+//    }
+//
+//    /**
+//     * 计算当前处理速度
+//     */
+//    private Double calculateCurrentProcessingSpeed(ImportTaskDO task) {
+//        if (task.getStartTime() == null || task.getTotalRecords() == null || task.getTotalRecords() == 0) {
+//            return 0.0;
+//        }
+//
+//        long elapsedSeconds = calculateElapsedSeconds(task.getStartTime());
+//        if (elapsedSeconds == 0) {
+//            return 0.0;
+//        }
+//
+//        return task.getSuccessRecords().doubleValue() / elapsedSeconds;
+//    }
+//
+//    /**
+//     * 格式化处理速度显示
+//     */
+//    private String formatProcessingSpeed(Double speed) {
+//        if (speed == null || speed == 0) {
+//            return "0 记录/秒";
+//        }
+//
+//        if (speed >= 1000) {
+//            return String.format("%.1fk 记录/秒", speed / 1000);
+//        } else if (speed >= 1) {
+//            return String.format("%.1f 记录/秒", speed);
+//        } else {
+//            return String.format("%.2f 记录/秒", speed);
+//        }
+//    }
+//
+//    /**
+//     * 执行完整的导入流程
+//     * 体现了整个导入的核心逻辑和状态流转
+//     */
+//    private void executeImportProcess(ImportTaskDO task, String filePath) {
+//        Long taskId = task.getId();
+//
+//        try {
+//            // 第一阶段：文件解压和验证
+//            log.info("开始执行导入任务: taskId={}, taskNo={}", taskId, task.getTaskNo());
+//            updateTaskStatus(taskId, TaskStatusEnum.EXTRACTING);
+//
+//            // 更新进度
+//            updateTaskProgress(taskId, 10, "正在解压文件...", "EXTRACTING");
+//
+//            // 关键改进：直接基于文件路径进行解压和验证
+//            FileExtractResult extractResult = fileExtractService.extractAndValidateFromPath(taskId, filePath);
+//            if (!extractResult.getSuccess()) {
+//                throw exception(ZIP_EXTRACT_FAILED, extractResult.getErrorMessage());
+//            }
+//
+//            // 创建任务明细记录
+//            createTaskDetails(taskId, task.getTaskNo(), extractResult.getFileInfos());
+//            updateTaskProgress(taskId, 20, "文件解压完成，准备导入数据...", "EXTRACTING");
+//
+//            // 第二阶段：按顺序解析和导入数据
+//            updateTaskStatus(taskId, TaskStatusEnum.IMPORTING);
+//
+//            boolean hasError = false;
+//            int totalSuccess = 0;
+//            int totalFailed = 0;
+//            int processedTables = 0;
+//
+//            // 按预定义顺序处理每个文件
+//            for (TableTypeEnum tableType : IMPORT_ORDER) {
+//                FileInfo fileInfo = extractResult.getFileInfo(tableType);
+//                if (fileInfo == null) {
+//                    log.warn("未找到对应文件: tableType={}", tableType);
+//                    continue;
+//                }
+//
+//                try {
+//                    // 计算当前进度
+//                    int currentProgress = 20 + (processedTables * 50 / IMPORT_ORDER.size());
+//                    updateTaskProgress(taskId, currentProgress,
+//                            String.format("正在处理%s...", getTableDisplayName(tableType)), "IMPORTING");
+//
+//                    ImportResult result = processTableData(taskId, tableType, fileInfo);
+//                    totalSuccess += result.getSuccessCount();
+//                    totalFailed += result.getFailedCount();
+//
+//                    if (result.getHasError()) {
+//                        hasError = true;
+//                    }
+//
+//                    processedTables++;
+//
+//                } catch (Exception e) {
+//                    log.error("处理表数据失败: taskId={}, tableType={}", taskId, tableType, e);
+//                    hasError = true;
+//                    updateDetailStatus(taskId, tableType, DetailStatusEnum.FAILED, e.getMessage());
+//                }
+//            }
+//
+//            // 第三阶段：执行质控检查
+//            updateTaskStatus(taskId, TaskStatusEnum.QC_CHECKING);
+//            updateTaskProgress(taskId, 80, "正在执行质控检查...", "QC_CHECKING");
+//
+//            // 执行质控检查
+//            QualityControlResult qcResult = qualityControlService.executeOverallQualityControl(taskId);
+//
+//            // 第四阶段：更新最终状态
+//            TaskStatusEnum finalStatus = determineFinalStatus(hasError, qcResult);
+//            updateTaskFinalStatus(taskId, finalStatus, totalSuccess, totalFailed);
+//            updateTaskProgress(taskId, 100, "任务处理完成", finalStatus.name());
+//
+//            log.info("导入任务完成: taskId={}, status={}, success={}, failed={}",
+//                    taskId, finalStatus, totalSuccess, totalFailed);
+//
+//        } catch (Exception e) {
+//            log.error("导入任务执行异常: taskId={}", taskId, e);
+//            handleTaskError(taskId, e.getMessage());
+//            updateTaskProgress(taskId, -1, "任务执行失败: " + e.getMessage(), "FAILED");
+//        }
+//    }
+//
+//    /**
+//     * 更新任务进度
+//     *
+//     * @param taskId       任务ID
+//     * @param progress     进度百分比
+//     * @param message      状态描述
+//     * @param currentStage 当前阶段
+//     */
+//    private void updateTaskProgress(Long taskId, int progress, String message, String currentStage) {
+//        // 构建进度信息对象
+//        TaskProgressInfo progressInfo = TaskProgressInfo.builder()
+//                .taskId(taskId)
+//                .progress(progress)
+//                .message(message)
+//                .currentStage(currentStage)
+//                .estimatedRemainingSeconds(calculateEstimatedRemainingTime(progress))
+//                .updateTime(LocalDateTime.now())
+//                .build();
+//
+//        taskProgressRedisDAO.setTaskProgress(progressInfo);
+//
+//        log.debug("任务进度已更新: taskId={}, progress={}%, message={}", taskId, progress, message);
+//    }
+//
+//    /**
+//     * 更新任务明细进度
+//     */
+//    private void updateDetailProgress(Long taskId, TableTypeEnum tableType, int progress, String message) {
+//        TaskDetailProgressInfo detailProgress = TaskDetailProgressInfo.builder()
+//                .taskId(taskId)
+//                .tableType(tableType.name())
+//                .progress(progress)
+//                .message(message)
+//                .status("PROCESSING")
+//                .updateTime(LocalDateTime.now())
+//                .build();
+//
+//        taskProgressRedisDAO.setTaskDetailProgress(detailProgress);
+//    }
+//
+//    /**
+//     * 处理单个表的数据导入
+//     */
+//    private ImportResult processTableData(Long taskId, TableTypeEnum tableType, FileInfo fileInfo) {
+//        log.info("开始处理表数据: taskId={}, tableType={}, fileName={}",
+//                taskId, tableType, fileInfo.getFileName());
+//
+//        // 1. 更新明细状态为解析中
+//        updateDetailStatus(taskId, tableType, DetailStatusEnum.PARSING, null);
+//        updateDetailProgress(taskId, tableType, 10, "正在解析Excel文件...");
+//
+//        // 2. 解析Excel文件
+//        ParseResult parseResult = dataParseService.parseExcelFile(fileInfo, tableType);
+//        if (!parseResult.getSuccess()) {
+//            throw exception(FILE_READ_ERROR, parseResult.getErrorMessage());
+//        }
+//
+//        updateDetailProgress(taskId, tableType, 30,
+//                String.format("解析完成，共%d条数据", parseResult.getTotalRows()));
+//
+//        // 3. 更新明细状态为导入中
+//        updateDetailStatus(taskId, tableType, DetailStatusEnum.IMPORTING, null);
+//
+//        // 4. 分批执行数据导入（避免大事务）
+//        ImportResult importResult = batchImportData(taskId, tableType, parseResult.getDataList());
+//
+//        updateDetailProgress(taskId, tableType, 70,
+//                String.format("导入完成，成功%d条，失败%d条",
+//                        importResult.getSuccessCount(), importResult.getFailedCount()));
+//
+//        // 5. 更新明细状态为质控中
+//        updateDetailStatus(taskId, tableType, DetailStatusEnum.QC_CHECKING, null);
+//
+//        // 6. 执行表级质控
+//        QualityControlResult qcResult = qualityControlService.executeTableQualityControl(taskId, tableType);
+//
+//        updateDetailProgress(taskId, tableType, 100,
+//                String.format("质控完成，通过%d条，失败%d条",
+//                        qcResult.getPassedCount(), qcResult.getFailedCount()));
+//
+//        // 7. 确定最终状态
+//        DetailStatusEnum finalStatus = qcResult.getSuccess() ?
+//                (importResult.getHasError() ? DetailStatusEnum.PARTIAL_SUCCESS : DetailStatusEnum.SUCCESS) :
+//                DetailStatusEnum.FAILED;
+//
+//        updateDetailFinalStatus(taskId, tableType, finalStatus, importResult, qcResult);
+//
+//        return importResult;
+//    }
+//
+//    /**
+//     * 分批导入数据
+//     */
+//    private ImportResult batchImportData(Long taskId, TableTypeEnum tableType, List<?> dataList) {
+//        int batchSize = 1000; // 每批处理1000条
+//        int totalRows = dataList.size();
+//        int successCount = 0;
+//        int failedCount = 0;
+//
+//        for (int i = 0; i < totalRows; i += batchSize) {
+//            int end = Math.min(i + batchSize, totalRows);
+//            List<?> batch = dataList.subList(i, end);
+//
+//            try {
+//                // 执行批量插入
+//                ImportResult batchResult = dataImportService.importBatch(taskId, tableType, batch);
+//                successCount += batchResult.getSuccessCount();
+//                failedCount += batchResult.getFailedCount();
+//
+//                // 更新明细进度
+//                int progress = 30 + (end * 40 / totalRows);
+//                updateDetailProgress(taskId, tableType, progress,
+//                        String.format("正在导入数据...(%d/%d)", end, totalRows));
+//
+//            } catch (Exception e) {
+//                log.error("批量导入失败: taskId={}, tableType={}, batch={}-{}",
+//                        taskId, tableType, i, end, e);
+//                failedCount += batch.size();
+//            }
+//        }
+//
+//        return ImportResult.builder()
+//                .successCount(successCount)
+//                .failedCount(failedCount)
+//                .totalCount(successCount + failedCount)
+//                .hasError(failedCount > 0)
+//                .build();
+//    }
+//
+//    @Override
+//    public ImportProgressVO getTaskProgress(Long taskId) {
+//        // 查询主任务信息
+//        ImportTaskDO task = taskMapper.selectById(taskId);
+//        if (task == null) {
+//            throw exception(TASK_NOT_FOUND);
+//        }
+//
+//        // 查询任务明细
+//        List<ImportTaskDetailDO> details = taskDetailMapper.selectList(new LambdaQueryWrapper<ImportTaskDetailDO>()
+//                .eq(ImportTaskDetailDO::getTaskId, taskId));
+//
+//        TaskProgressInfo progressInfo = taskProgressRedisDAO.getTaskProgress(taskId);
+//
+//        // 获取所有明细进度信息
+//        Map<String, TaskDetailProgressInfo> detailProgressMap =
+//                taskProgressRedisDAO.getAllTaskDetailProgress(taskId);
+//
+//        // 构建进度信息
+//        return ImportProgressVO.builder()
+//                .taskId(taskId)
+//                .taskNo(task.getTaskNo())
+//                .taskName(task.getTaskName())
+//                .overallStatus(task.getStatus())
+//                .overallProgress(progressInfo != null ? progressInfo.getProgress() : task.getProgressPercent())
+//                .currentMessage(progressInfo != null ? progressInfo.getMessage() : "")
+//                .currentStage(progressInfo != null ? progressInfo.getCurrentStage() : "")
+//                .estimatedRemainingTime(progressInfo != null ? progressInfo.getEstimatedRemainingSeconds() : null)
+//                .startTime(task.getStartTime())
+//                .estimatedEndTime(calculateEstimatedEndTime(task, details))
+//                .totalFiles(task.getTotalFiles())
+//                .successFiles(task.getSuccessFiles())
+//                .failedFiles(task.getFailedFiles())
+//                .totalRecords(task.getTotalRecords())
+//                .successRecords(task.getSuccessRecords())
+//                .failedRecords(task.getFailedRecords())
+//                .tableProgress(buildTableProgressList(details, detailProgressMap))
+//                .canRetry(canRetryTask(task))
+//                .build();
+//    }
+//
+//    @Override
+//    @Transactional(rollbackFor = Exception.class)
+//    public ImportRetryResult retryImport(Long taskId, RetryTypeEnum retryType, String fileType) {
+//        // 验证任务状态
+//        ImportTaskDO task = taskMapper.selectById(taskId);
+//        if (task == null) {
+//            throw exception(TASK_NOT_FOUND);
+//        }
+//
+//        if (!canRetryTask(task)) {
+//            throw exception(IMPORT_RETRY_NOT_SUPPORTED);
+//        }
+//
+//        // 使用分布式锁确保重试操作的安全性
+//        Long userId = SecurityFrameworkUtils.getLoginUserId();
+//        if (!taskProgressRedisDAO.tryLockTask(taskId, userId)) {
+//            throw exception(IMPORT_TASK_LOCKED);
+//        }
+//
+//        try {
+//            log.info("开始重试导入任务: taskId={}, retryType={}, fileType={}, userId={}",
+//                    taskId, retryType, fileType, userId);
+//
+//            // 根据重试类型执行不同的重试策略
+//            return switch (retryType) {
+//                case ALL -> retryAllTables(task);
+//                case FAILED -> retryFailedTables(task);
+//                case FILE_TYPE -> retrySpecificTable(task, fileType);
+//                default -> throw exception(IMPORT_RETRY_TYPE_UNSUPPORTED);
+//            };
+//        } finally {
+//            // 确保锁被释放
+//            taskProgressRedisDAO.unlockTask(taskId, userId);
+//        }
+//    }
+//
+//    @Override
+//    public void cancelTask(Long taskId) {
+//        Long userId = SecurityFrameworkUtils.getLoginUserId();
+//
+//        // 尝试获取任务锁
+//        if (!taskProgressRedisDAO.tryLockTask(taskId, userId)) {
+//            throw exception(IMPORT_TASK_LOCKED);
+//        }
+//
+//        try {
+//            // 执行取消逻辑
+//            log.info("取消导入任务: taskId={}, userId={}", taskId, userId);
+//
+//            // 更新数据库状态
+//            updateTaskStatus(taskId, TaskStatusEnum.CANCELLED);
+//
+//            // 清理Redis缓存
+//            taskProgressRedisDAO.deleteTaskProgress(taskId);
+//            taskProgressRedisDAO.deleteAllTaskDetailProgress(taskId);
+//
+//        } finally {
+//            taskProgressRedisDAO.unlockTask(taskId, userId);
+//        }
+//    }
+//
+//    @Override
+//    public PageResult<ImportTaskDO> getTaskPage(ImportTaskPageReqVO pageReqVO) {
+//        return taskMapper.selectPage(pageReqVO);
+//    }
+//
+//    /**
+//     * 文件验证接口 - 重构版
+//     * 现在也基于保存后的文件进行验证，保持接口的一致性
+//     */
+//    @Override
+//    public FileValidationResult validateImportFile(MultipartFile file) {
+//        log.info("开始验证导入文件: fileName={}, fileSize={}",
+//                file.getOriginalFilename(), file.getSize());
+//
+//        try {
+//            // 1. 基础验证
+//            validateBasicFileProperties(file);
+//
+//            // 2. 临时保存文件
+//            String tempTaskNo = "VALIDATE_" + System.currentTimeMillis();
+//            String tempFilePath = saveUploadedFileImmediately(file, tempTaskNo);
+//
+//            try {
+//                // 3. 基于文件路径进行深度验证
+//                FileExtractResult extractResult = fileExtractService.extractAndValidateFromPath(
+//                        System.currentTimeMillis(), tempFilePath);
+//
+//                if (extractResult.getSuccess()) {
+//                    return buildSuccessValidationResult(file, extractResult);
+//                } else {
+//                    return buildFailedValidationResult(file, extractResult);
+//                }
+//
+//            } finally {
+//                // 4. 清理临时文件
+//                cleanupTempFile(tempFilePath);
+//            }
+//
+//        } catch (Exception e) {
+//            log.error("文件验证失败: fileName={}", file.getOriginalFilename(), e);
+//            return buildErrorValidationResult(file, e);
+//        }
+//    }
+//
+//    /**
+//     * 清理临时文件
+//     */
+//    private void cleanupTempFile(String filePath) {
+//        try {
+//            Path path = Paths.get(filePath);
+//            if (Files.exists(path)) {
+//                Files.delete(path);
+//                log.debug("临时文件已清理: {}", filePath);
+//            }
+//        } catch (IOException e) {
+//            log.warn("清理临时文件失败: {}", filePath, e);
+//        }
+//    }
+//
+//    private FileValidationResult buildSuccessValidationResult(MultipartFile file, FileExtractResult extractResult) {
+//        return FileValidationResult.builder()
+//                .valid(true)
+//                .fileName(file.getOriginalFilename())
+//                .fileSize(file.getSize())
+//                .expectedFileCount(5)
+//                .actualFileCount(extractResult.getValidFileCount())
+//                .validationMessage("文件验证通过，包含所有必需的Excel文件")
+//                .validationTime(LocalDateTime.now())
+//                .extractDurationMs(extractResult.getExtractDurationMs())
+//                .extractedFiles(convertToExtractedFileInfoList(extractResult.getFileInfos()))
+//                .build();
+//    }
+//
+//    private FileValidationResult buildFailedValidationResult(MultipartFile file, FileExtractResult extractResult) {
+//        return FileValidationResult.builder()
+//                .valid(false)
+//                .fileName(file.getOriginalFilename())
+//                .fileSize(file.getSize())
+//                .expectedFileCount(5)
+//                .actualFileCount(extractResult.getValidFileCount())
+//                .validationMessage(extractResult.getErrorMessage())
+//                .missingFiles(identifyMissingFiles(extractResult))
+//                .validationTime(LocalDateTime.now())
+//                .build();
+//    }
+//
+//    private FileValidationResult buildErrorValidationResult(MultipartFile file, Exception e) {
+//        return FileValidationResult.builder()
+//                .valid(false)
+//                .fileName(file.getOriginalFilename())
+//                .fileSize(file.getSize())
+//                .validationMessage("文件验证失败: " + e.getMessage())
+//                .validationTime(LocalDateTime.now())
+//                .build();
+//    }
+//
+//    /**
+//     * 转换文件信息为前端需要的格式
+//     * <p>
+//     * 这个方法是关键的数据转换逻辑，将后端的FileInfo转换为前端期望的ExtractedFileInfo
+//     */
+//    private List<FileValidationResult.ExtractedFileInfo> convertToExtractedFileInfoList(
+//            Map<TableTypeEnum, FileInfo> fileInfoMap) {
+//
+//        return fileInfoMap.entrySet().stream()
+//                .map(entry -> {
+//                    TableTypeEnum tableType = entry.getKey();
+//                    FileInfo fileInfo = entry.getValue();
+//
+//                    return FileValidationResult.ExtractedFileInfo.builder()
+//                            .fileName(fileInfo.getFileName())
+//                            .tableType(tableType.name()) // 将枚举转换为字符串
+//                            .rowCount(fileInfo.getEstimatedRowCount())
+//                            .fileSize(fileInfo.getFileSize())
+//                            .isValid(fileInfo.getIsValid())
+//                            .actualFields(fileInfo.getActualFields())
+//                            .previewData(fileInfo.getPreviewData())
+//                            .validRowCount(fileInfo.getValidRowCount())
+//                            .dataQuality(fileInfo.getDataQuality())
+//                            .encoding(fileInfo.getEncoding())
+//                            .qualityInfo(fileInfo.getQualityInfo())
+//                            .build();
+//                })
+//                .collect(Collectors.toList());
+//    }
+//
+//    /**
+//     * 获取任务执行日志
+//     * <p>
+//     * 提供任务执行过程的详细日志信息
+//     */
+//    @Override
+//    public TaskLogVO getTaskLogs(Long taskId, String logLevel) {
+//        log.debug("查询任务日志: taskId={}, logLevel={}", taskId, logLevel);
+//
+//        try {
+//            // 构建日志文件路径
+//            String logFilePath = buildLogFilePath(taskId);
+//
+//            // 读取日志文件
+//            String logContent = readLogFile(logFilePath, logLevel);
+//
+//            // 统计日志行数
+//            int totalLines = logContent.split("\n").length;
+//
+//            return TaskLogVO.builder()
+//                    .taskId(taskId)
+//                    .logs(logContent)
+//                    .logLevel(logLevel)
+//                    .totalLines(totalLines)
+//                    .lastUpdateTime(System.currentTimeMillis())
+//                    .logFileSize(calculateLogFileSize(logFilePath))
+//                    .hasMoreLogs(totalLines > 1000) // 超过1000行认为有更多日志
+//                    .build();
+//
+//        } catch (Exception e) {
+//            log.error("获取任务日志失败: taskId={}", taskId, e);
+//
+//            return TaskLogVO.builder()
+//                    .taskId(taskId)
+//                    .logs("日志读取失败: " + e.getMessage())
+//                    .logLevel(logLevel)
+//                    .totalLines(0)
+//                    .lastUpdateTime(System.currentTimeMillis())
+//                    .logFileSize(0L)
+//                    .hasMoreLogs(false)
+//                    .build();
+//        }
+//    }
+//
+//    // ==================== 私有辅助方法 ====================
+//
+//    /**
+//     * 基础文件属性验证（不读取文件内容）
+//     * 这一步只验证文件对象的基本属性，避免消耗输入流
+//     */
+//    private void validateBasicFileProperties(MultipartFile file) {
+//        if (file == null || file.isEmpty()) {
+//            throw new IllegalArgumentException("上传文件不能为空");
+//        }
+//
+//        String fileName = file.getOriginalFilename();
+//        if (!StringUtils.hasText(fileName)) {
+//            throw new IllegalArgumentException("文件名不能为空");
+//        }
+//
+//        String extension = getFileExtension(fileName).toLowerCase();
+//        if (!".zip".equals(extension) && !".rar".equals(extension)) {
+//            throw new IllegalArgumentException("仅支持ZIP和RAR格式的压缩文件");
+//        }
+//
+//        long maxSize = 100 * 1024 * 1024L; // 100MB
+//        if (file.getSize() > maxSize) {
+//            throw new IllegalArgumentException("文件大小不能超过100MB");
+//        }
+//    }
+//
+//    /**
+//     * 立即保存上传文件
+//     * 关键改进：文件一旦上传就立即持久化，后续操作都基于文件路径
+//     */
+//    private String saveUploadedFileImmediately(MultipartFile file, String taskNo) {
+//        try {
+//            String uploadDir = "/data/drug-import/uploads/";
+//            String fileName = taskNo + "_" + file.getOriginalFilename();
+//            Path filePath = Paths.get(uploadDir, fileName);
+//
+//            // 确保目录存在
+//            Files.createDirectories(filePath.getParent());
+//
+//            // 关键步骤：这是唯一一次读取MultipartFile的地方
+//            Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+//
+//            log.info("文件保存成功: taskNo={}, filePath={}, size={}KB",
+//                    taskNo, filePath, file.getSize() / 1024);
+//
+//            return filePath.toString();
+//        } catch (IOException e) {
+//            throw exception(FILE_UPLOAD_FAILED, "文件保存失败: " + e.getMessage());
+//        }
+//    }
+//
+//
+//    private List<String> identifyMissingFiles(FileExtractResult extractResult) {
+//        List<String> expectedFiles = Arrays.asList(
+//                "机构基本情况.xlsx", "药品目录.xlsx", "药品入库.xlsx", "药品出库.xlsx", "药品使用.xlsx"
+//        );
+//
+//        List<String> actualFiles = extractResult.getFileInfos().values().stream()
+//                .map(FileInfo::getFileName)
+//                .collect(Collectors.toList());
+//
+//        return expectedFiles.stream()
+//                .filter(expected -> actualFiles.stream()
+//                        .noneMatch(actual -> actual.contains(expected.replace(".xlsx", ""))))
+//                .collect(Collectors.toList());
+//    }
+//
+//    private List<ImportTaskExportDTO> convertToExportDTO(List<ImportTaskDO> taskList) {
+//        return taskList.stream()
+//                .map(this::convertToExportDTO)
+//                .collect(Collectors.toList());
+//    }
+//
+//    private ImportTaskExportDTO convertToExportDTO(ImportTaskDO task) {
+//        return ImportTaskExportDTO.builder()
+//                .taskNo(task.getTaskNo())
+//                .taskName(task.getTaskName())
+//                .fileName(task.getFileName())
+//                .statusDisplay(getStatusDisplayText(task.getStatus()))
+//                .totalFiles(task.getTotalFiles())
+//                .successFiles(task.getSuccessFiles())
+//                .failedFiles(task.getFailedFiles())
+//                .totalRecords(task.getTotalRecords())
+//                .successRecords(task.getSuccessRecords())
+//                .failedRecords(task.getFailedRecords())
+//                .progressPercent(task.getProgressPercent())
+//                .startTime(task.getStartTime())
+//                .endTime(task.getEndTime())
+//                .createTime(task.getCreateTime())
+//                .creator(task.getCreator())
+//                .build();
+//    }
+//
+//    private String getStatusDisplayText(Integer status) {
+//        return TaskStatusEnum.valueOf(String.valueOf(status)).getDescription();
+//    }
+//
+//    private String buildLogFilePath(Long taskId) {
+//        return String.format("/logs/drug-import/task_%d.log", taskId);
+//    }
+//
+//    private String readLogFile(String logFilePath, String logLevel) throws IOException {
+//        Path path = Paths.get(logFilePath);
+//
+//        if (!Files.exists(path)) {
+//            return "暂无日志记录";
+//        }
+//
+//        List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
+//
+//        // 根据日志级别过滤
+//        if (!"ALL".equals(logLevel)) {
+//            lines = lines.stream()
+//                    .filter(line -> line.contains(logLevel))
+//                    .collect(Collectors.toList());
+//        }
+//
+//        // 限制最大行数
+//        if (lines.size() > 1000) {
+//            lines = lines.subList(lines.size() - 1000, lines.size());
+//        }
+//
+//        return String.join("\n", lines);
+//    }
+//
+//    private Long calculateLogFileSize(String logFilePath) {
+//        try {
+//            Path path = Paths.get(logFilePath);
+//            return Files.exists(path) ? Files.size(path) : 0L;
+//        } catch (IOException e) {
+//            return 0L;
+//        }
+//    }
+//
+//    private String getFileExtension(String fileName) {
+//        int lastDotIndex = fileName.lastIndexOf('.');
+//        return lastDotIndex > 0 ? fileName.substring(lastDotIndex) : "";
+//    }
+//
+//    /**
+//     * 创建任务记录 - 修复版
+//     * <p>
+//     * 修复说明：
+//     * 1. 将任务编号生成职责移到TaskProgressRedisDAO中
+//     * 2. 增强了异常处理机制
+//     * 3. 优化了日志记录
+//     */
+//    private ImportTaskDO createTaskRecord(MultipartFile file, String taskName) {
+//        // 使用Redis DAO生成任务编号，体现职责分离
+//        String taskNo = taskProgressRedisDAO.generateTaskNo();
+//
+//        // 保存文件到指定路径
+//        String filePath = saveUploadedFile(file, taskNo);
+//
+//        ImportTaskDO task = ImportTaskDO.builder()
+//                .taskNo(taskNo)
+//                .taskName(taskName)
+//                .fileName(file.getOriginalFilename())
+//                .filePath(filePath)
+//                .fileSize(file.getSize())
+//                .totalFiles(0) // 初始为0，解压后更新
+//                .successFiles(0)
+//                .failedFiles(0)
+//                .totalRecords(0L)
+//                .successRecords(0L)
+//                .failedRecords(0L)
+//                .status(TaskStatusEnum.PENDING.getStatus())
+//                .extractStatus(0) // 未开始
+//                .importStatus(0) // 未开始
+//                .qcStatus(0) // 未开始
+//                .progressPercent(0)
+//                .build();
+//
+//        taskMapper.insert(task);
+//        log.info("任务记录创建成功: taskId={}, taskNo={}", task.getId(), taskNo);
+//        return task;
+//    }
+//
+//    /**
+//     * 保存上传文件
+//     */
+//    private String saveUploadedFile(MultipartFile file, String taskNo) {
+//        try {
+//            String uploadDir = "/data/drug-import/uploads/";
+//            String fileName = taskNo + "_" + file.getOriginalFilename();
+//            Path filePath = Paths.get(uploadDir, fileName);
+//
+//            // 确保目录存在
+//            Files.createDirectories(filePath.getParent());
+//
+//            // 保存文件
+//            Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+//
+//            return filePath.toString();
+//        } catch (IOException e) {
+//            throw exception(FILE_UPLOAD_FAILED, "文件保存失败: " + e.getMessage());
+//        }
+//    }
+//
+//    /**
+//     * 处理任务错误
+//     */
+//    private void handleTaskError(Long taskId, String errorMessage) {
+//        try {
+//            ImportTaskDO updateTask = ImportTaskDO.builder()
+//                    .id(taskId)
+//                    .status(TaskStatusEnum.FAILED.getStatus())
+//                    .errorMessage(errorMessage)
+//                    .endTime(LocalDateTime.now())
+//                    .progressPercent(-1) // -1表示失败
+//                    .build();
+//
+//            taskMapper.updateById(updateTask);
+//
+//            // 清理Redis缓存
+//            taskProgressRedisDAO.deleteTaskProgress(taskId);
+//            taskProgressRedisDAO.deleteAllTaskDetailProgress(taskId);
+//
+//            log.error("任务处理失败: taskId={}, error={}", taskId, errorMessage);
+//        } catch (Exception e) {
+//            log.error("处理任务错误时异常: taskId={}", taskId, e);
+//        }
+//    }
+//
+//    /**
+//     * 更新任务状态 - 修复版
+//     * <p>
+//     * 修复说明：
+//     * 1. 修正了状态判断逻辑，避免不可能的条件分支
+//     * 2. 优化了时间字段的设置逻辑
+//     * 3. 增强了代码的可读性和维护性
+//     */
+//    private void updateTaskStatus(Long taskId, TaskStatusEnum status) {
+//        ImportTaskDO updateTask = ImportTaskDO.builder()
+//                .id(taskId)
+//                .status(status.getStatus())
+//                .build();
+//
+//        // 根据状态设置对应的时间字段
+//        LocalDateTime now = LocalDateTime.now();
+//        switch (status) {
+//            case EXTRACTING:
+//                updateTask.setStartTime(now);
+//                break;
+//            case IMPORTING:
+//                updateTask.setExtractEndTime(now);
+//                break;
+//            case QC_CHECKING:
+//                updateTask.setImportEndTime(now);
+//                break;
+//            case COMPLETED:
+//            case FAILED:
+//            case PARTIAL_SUCCESS:
+//                // 修复：移除了不可能的条件判断
+//                // 原代码在PARTIAL_SUCCESS分支中检查status == QC_CHECKING，这永远不会为真
+//                updateTask.setEndTime(now);
+//                break;
+//            case CANCELLED:
+//                updateTask.setEndTime(now);
+//                break;
+//        }
+//
+//        // 如果是从QC_CHECKING状态转换到最终状态，需要设置QC结束时间
+//        if (status == TaskStatusEnum.COMPLETED || status == TaskStatusEnum.FAILED ||
+//                status == TaskStatusEnum.PARTIAL_SUCCESS) {
+//            updateTask.setQcEndTime(now);
+//        }
+//
+//        taskMapper.updateById(updateTask);
+//        log.debug("任务状态已更新: taskId={}, status={}", taskId, status.getDescription());
+//    }
+//
+//    /**
+//     * 创建任务明细记录 - 修复版
+//     * <p>
+//     * 修复说明：根据实际解压的文件信息创建明细记录，而不是预定义的所有类型
+//     */
+//    private void createTaskDetails(Long taskId, String taskNo, Map<TableTypeEnum, FileInfo> fileInfos) {
+//        // 为实际存在的文件类型创建明细记录
+//        fileInfos.forEach((tableType, fileInfo) -> {
+//            ImportTaskDetailDO detail = ImportTaskDetailDO.builder()
+//                    .taskId(taskId)
+//                    .taskNo(taskNo)
+//                    .fileType(getFileTypeByTable(tableType))
+//                    .fileName(fileInfo.getFileName())
+//                    .targetTable(tableType.getTableName())
+//                    .tableType(tableType.getType())
+//                    .status(DetailStatusEnum.PENDING.getStatus())
+//                    .parseStatus(0) // 未开始
+//                    .importStatus(0) // 未开始
+//                    .qcStatus(0) // 未开始
+//                    .progressPercent(0)
+//                    .retryCount(0)
+//                    .maxRetryCount(3)
+//                    .totalRows((long) fileInfo.getEstimatedRowCount())
+//                    .build();
+//
+//            taskDetailMapper.insert(detail);
+//        });
+//
+//        log.info("任务明细记录创建完成: taskId={}, count={}", taskId, fileInfos.size());
+//    }
+//
+//    /**
+//     * 获取表类型对应的文件类型
+//     */
+//    private String getFileTypeByTable(TableTypeEnum tableType) {
+//        return switch (tableType) {
+//            case HOSPITAL_INFO -> "HOSPITAL_INFO";
+//            case DRUG_CATALOG -> "DRUG_CATALOG";
+//            case DRUG_INBOUND -> "DRUG_INBOUND";
+//            case DRUG_OUTBOUND -> "DRUG_OUTBOUND";
+//            case DRUG_USAGE -> "DRUG_USAGE";
+//        };
+//    }
+//
+//    /**
+//     * 获取表类型的显示名称
+//     */
+//    private String getTableDisplayName(TableTypeEnum tableType) {
+//        return tableType.getDescription();
+//    }
+//
+//    /**
+//     * 确定最终状态
+//     * 基于导入结果和质控结果综合判断任务最终状态
+//     */
+//    private TaskStatusEnum determineFinalStatus(boolean hasError, QualityControlResult qcResult) {
+//        if (!qcResult.getSuccess()) {
+//            return TaskStatusEnum.FAILED;
+//        }
+//
+//        if (hasError) {
+//            return TaskStatusEnum.PARTIAL_SUCCESS;
+//        }
+//
+//        return TaskStatusEnum.COMPLETED;
+//    }
+//
+//    /**
+//     * 更新任务最终状态
+//     */
+//    private void updateTaskFinalStatus(Long taskId, TaskStatusEnum finalStatus,
+//                                       int totalSuccess, int totalFailed) {
+//        ImportTaskDO updateTask = ImportTaskDO.builder()
+//                .id(taskId)
+//                .status(finalStatus.getStatus())
+//                .successRecords((long) totalSuccess)
+//                .failedRecords((long) totalFailed)
+//                .totalRecords((long) (totalSuccess + totalFailed))
+//                .endTime(LocalDateTime.now())
+//                .progressPercent(100)
+//                .build();
+//
+//        taskMapper.updateById(updateTask);
+//        log.info("任务最终状态已更新: taskId={}, status={}, success={}, failed={}",
+//                taskId, finalStatus.getDescription(), totalSuccess, totalFailed);
+//    }
+//
+//    /**
+//     * 更新明细状态
+//     */
+//    private void updateDetailStatus(Long taskId, TableTypeEnum tableType,
+//                                    DetailStatusEnum status, String errorMessage) {
+//        LambdaQueryWrapper<ImportTaskDetailDO> wrapper = new LambdaQueryWrapper<>();
+//        wrapper.eq(ImportTaskDetailDO::getTaskId, taskId)
+//                .eq(ImportTaskDetailDO::getTableType, tableType.getType());
+//
+//        ImportTaskDetailDO detail = taskDetailMapper.selectOne(wrapper);
+//        if (detail != null) {
+//            detail.setStatus(status.getStatus());
+//            if (errorMessage != null) {
+//                detail.setErrorMessage(errorMessage);
+//            }
+//
+//            // 根据状态设置对应的时间和状态字段
+//            LocalDateTime now = LocalDateTime.now();
+//            switch (status) {
+//                case PARSING:
+//                    detail.setStartTime(now);
+//                    detail.setParseStatus(1); // 进行中
+//                    break;
+//                case IMPORTING:
+//                    detail.setParseStatus(2); // 成功
+//                    detail.setParseEndTime(now);
+//                    detail.setImportStatus(1); // 进行中
+//                    break;
+//                case QC_CHECKING:
+//                    detail.setImportStatus(2); // 成功
+//                    detail.setImportEndTime(now);
+//                    detail.setQcStatus(1); // 进行中
+//                    break;
+//                case SUCCESS:
+//                case PARTIAL_SUCCESS:
+//                    detail.setQcStatus(2); // 成功
+//                    detail.setQcEndTime(now);
+//                    detail.setEndTime(now);
+//                    detail.setProgressPercent(100);
+//                    break;
+//                case FAILED:
+//                    detail.setEndTime(now);
+//                    detail.setProgressPercent(-1);
+//                    break;
+//            }
+//
+//            taskDetailMapper.updateById(detail);
+//        }
+//    }
+//
+//    /**
+//     * 更新明细最终状态
+//     */
+//    private void updateDetailFinalStatus(Long taskId, TableTypeEnum tableType,
+//                                         DetailStatusEnum finalStatus,
+//                                         ImportResult importResult,
+//                                         QualityControlResult qcResult) {
+//        LambdaQueryWrapper<ImportTaskDetailDO> wrapper = new LambdaQueryWrapper<>();
+//        wrapper.eq(ImportTaskDetailDO::getTaskId, taskId)
+//                .eq(ImportTaskDetailDO::getTableType, tableType.getType());
+//
+//        ImportTaskDetailDO detail = taskDetailMapper.selectOne(wrapper);
+//        if (detail != null) {
+//            detail.setStatus(finalStatus.getStatus());
+//            detail.setEndTime(LocalDateTime.now());
+//            detail.setSuccessRows((long) importResult.getSuccessCount());
+//            detail.setFailedRows((long) importResult.getFailedCount());
+//            detail.setTotalRows((long) importResult.getTotalCount());
+//            detail.setQcPassedRows(qcResult.getPassedCount());
+//            detail.setQcFailedRows(qcResult.getFailedCount());
+//            detail.setProgressPercent(100);
+//
+//            taskDetailMapper.updateById(detail);
+//        }
+//    }
+//
+//    /**
+//     * 计算预计结束时间
+//     */
+//    private LocalDateTime calculateEstimatedEndTime(ImportTaskDO task, List<ImportTaskDetailDO> details) {
+//        if (task.getStartTime() == null) {
+//            return null;
+//        }
+//
+//        // 基于当前进度和历史数据估算
+//        int currentProgress = task.getProgressPercent();
+//        if (currentProgress <= 0) {
+//            return task.getStartTime().plusMinutes(30); // 默认30分钟
+//        }
+//
+//        Duration elapsed = Duration.between(task.getStartTime(), LocalDateTime.now());
+//        double progressRatio = currentProgress / 100.0;
+//        long estimatedTotalMinutes = (long) (elapsed.toMinutes() / progressRatio);
+//
+//        return task.getStartTime().plusMinutes(estimatedTotalMinutes);
+//    }
+//
+//    /**
+//     * 判断任务是否可以重试
+//     */
+//    private boolean canRetryTask(ImportTaskDO task) {
+//        TaskStatusEnum status = TaskStatusEnum.getByType(task.getStatus());
+//        return status == TaskStatusEnum.FAILED || status == TaskStatusEnum.PARTIAL_SUCCESS;
+//    }
+//
+//    /**
+//     * 全部重试
+//     */
+//    private ImportRetryResult retryAllTables(ImportTaskDO task) {
+//        log.info("执行全部重试: taskId={}", task.getId());
+//
+//        // 重置任务状态
+//        resetTaskStatus(task.getId());
+//
+//        // 生成重试批次号
+//        String retryBatchNo = taskProgressRedisDAO.generateRetryBatchNo(task.getId(), "ALL");
+//
+//        // 重新启动导入流程
+//        CompletableFuture.runAsync(() -> {
+//            try {
+//                // 重新读取文件执行导入
+//                executeImportProcess(task, task.getFilePath());
+//            } catch (Exception e) {
+//                log.error("全部重试失败: taskId={}", task.getId(), e);
+//                handleTaskError(task.getId(), "重试失败: " + e.getMessage());
+//            }
+//        }, asyncTaskExecutor);
+//
+//        return ImportRetryResult.builder()
+//                .taskId(task.getId())
+//                .taskNo(task.getTaskNo())
+//                .success(true)
+//                .message("全部重试已启动")
+//                .retryType("ALL")
+//                .retryScope(List.of("ALL_TABLES"))
+//                .retryStartTime(LocalDateTime.now())
+//                .retryBatchNo(retryBatchNo)
+//                .build();
+//    }
+//
+//    /**
+//     * 仅失败部分重试
+//     */
+//    private ImportRetryResult retryFailedTables(ImportTaskDO task) {
+//        log.info("执行失败部分重试: taskId={}", task.getId());
+//
+//        // 查询失败的明细
+//        List<ImportTaskDetailDO> failedDetails = getFailedTaskDetails(task.getId());
+//
+//        if (failedDetails.isEmpty()) {
+//            return ImportRetryResult.builder()
+//                    .taskId(task.getId())
+//                    .taskNo(task.getTaskNo())
+//                    .success(false)
+//                    .message("没有找到失败的处理项")
+//                    .build();
+//        }
+//
+//        List<String> retryScope = failedDetails.stream()
+//                .map(detail -> TableTypeEnum.getByType(detail.getTableType()).name())
+//                .collect(Collectors.toList());
+//
+//        // 生成重试批次号
+//        String retryBatchNo = taskProgressRedisDAO.generateRetryBatchNo(task.getId(), "FAILED");
+//
+//        // 重试失败的表
+//        retrySpecificTables(task, failedDetails);
+//
+//        return ImportRetryResult.builder()
+//                .taskId(task.getId())
+//                .taskNo(task.getTaskNo())
+//                .success(true)
+//                .message("失败部分重试已启动")
+//                .retryType("FAILED")
+//                .retryScope(retryScope)
+//                .retryStartTime(LocalDateTime.now())
+//                .retryBatchNo(retryBatchNo)
+//                .build();
+//    }
+//
+//    /**
+//     * 指定表类型重试
+//     */
+//    private ImportRetryResult retrySpecificTable(ImportTaskDO task, String fileType) {
+//        log.info("执行指定类型重试: taskId={}, fileType={}", task.getId(), fileType);
+//
+//        TableTypeEnum tableType;
+//        try {
+//            tableType = TableTypeEnum.valueOf(fileType);
+//        } catch (IllegalArgumentException e) {
+//            return ImportRetryResult.builder()
+//                    .taskId(task.getId())
+//                    .taskNo(task.getTaskNo())
+//                    .success(false)
+//                    .message("不支持的文件类型: " + fileType)
+//                    .build();
+//        }
+//
+//        // 生成重试批次号
+//        String retryBatchNo = taskProgressRedisDAO.generateRetryBatchNo(task.getId(), fileType);
+//
+//        // 重试指定表
+//        retrySpecificTables(task, Collections.singletonList(getTaskDetailByTableType(task.getId(), tableType)));
+//
+//        return ImportRetryResult.builder()
+//                .taskId(task.getId())
+//                .taskNo(task.getTaskNo())
+//                .success(true)
+//                .message("指定类型重试已启动")
+//                .retryType("FILE_TYPE")
+//                .retryScope(Collections.singletonList(fileType))
+//                .retryStartTime(LocalDateTime.now())
+//                .retryBatchNo(retryBatchNo)
+//                .build();
+//    }
+//
+//    /**
+//     * 重置任务状态
+//     */
+//    private void resetTaskStatus(Long taskId) {
+//        ImportTaskDO updateTask = ImportTaskDO.builder()
+//                .id(taskId)
+//                .status(TaskStatusEnum.PENDING.getStatus())
+//                .extractStatus(0)
+//                .importStatus(0)
+//                .qcStatus(0)
+//                .progressPercent(0)
+//                .errorMessage(null)
+//                .errorDetail(null)
+//                .startTime(null)
+//                .endTime(null)
+//                .build();
+//
+//        taskMapper.updateById(updateTask);
+//    }
+//
+//    /**
+//     * 获取失败的任务明细
+//     */
+//    private List<ImportTaskDetailDO> getFailedTaskDetails(Long taskId) {
+//        LambdaQueryWrapper<ImportTaskDetailDO> wrapper = new LambdaQueryWrapper<>();
+//        wrapper.eq(ImportTaskDetailDO::getTaskId, taskId)
+//                .eq(ImportTaskDetailDO::getStatus, DetailStatusEnum.FAILED.getStatus());
+//
+//        return taskDetailMapper.selectList(wrapper);
+//    }
+//
+//    /**
+//     * 重试指定的表
+//     */
+//    private void retrySpecificTables(ImportTaskDO task, List<ImportTaskDetailDO> detailsToRetry) {
+//        CompletableFuture.runAsync(() -> {
+//            try {
+//                for (ImportTaskDetailDO detail : detailsToRetry) {
+//                    TableTypeEnum tableType = TableTypeEnum.getByType(detail.getTableType());
+//
+//                    // 重置明细状态
+//                    resetDetailStatus(detail.getId());
+//
+//                    // 重新处理该表
+//                    log.info("重试处理表: taskId={}, tableType={}", task.getId(), tableType);
+//
+//                    // 实际的重试逻辑...
+//                }
+//            } catch (Exception e) {
+//                log.error("指定表重试失败: taskId={}", task.getId(), e);
+//            }
+//        }, asyncTaskExecutor);
+//    }
+//
+//    /**
+//     * 重置明细状态
+//     */
+//    private void resetDetailStatus(Long detailId) {
+//        ImportTaskDetailDO updateDetail = ImportTaskDetailDO.builder()
+//                .id(detailId)
+//                .status(DetailStatusEnum.PENDING.getStatus())
+//                .parseStatus(0)
+//                .importStatus(0)
+//                .qcStatus(0)
+//                .progressPercent(0)
+//                .errorMessage(null)
+//                .startTime(null)
+//                .endTime(null)
+//                .build();
+//
+//        taskDetailMapper.updateById(updateDetail);
+//    }
+//
+//    /**
+//     * 根据表类型获取任务明细
+//     */
+//    private ImportTaskDetailDO getTaskDetailByTableType(Long taskId, TableTypeEnum tableType) {
+//        LambdaQueryWrapper<ImportTaskDetailDO> wrapper = new LambdaQueryWrapper<>();
+//        wrapper.eq(ImportTaskDetailDO::getTaskId, taskId)
+//                .eq(ImportTaskDetailDO::getTableType, tableType.getType());
+//
+//        return taskDetailMapper.selectOne(wrapper);
+//    }
+//
+//    /**
+//     * 计算预计剩余时间
+//     * <p>
+//     * 这是一个业务逻辑方法，基于当前进度估算剩余时间
+//     */
+//    private Long calculateEstimatedRemainingTime(int currentProgress) {
+//        if (currentProgress <= 0 || currentProgress >= 100) {
+//            return 0L;
+//        }
+//
+//        // 简单的线性估算，实际项目中可以使用更复杂的算法
+//        // 假设总时间需要30分钟，根据当前进度计算剩余时间
+//        long totalEstimatedSeconds = 30 * 60; // 30分钟
+//        long remainingProgress = 100 - currentProgress;
+//        return (totalEstimatedSeconds * remainingProgress) / 100;
+//    }
+//
+//    /**
+//     * 构建表进度列表，整合数据库信息和Redis缓存信息
+//     * <p>
+//     * 这个方法展示了如何将持久化数据和缓存数据有机结合
+//     */
+//    private List<TableProgressVO> buildTableProgressList(
+//            List<ImportTaskDetailDO> details,
+//            Map<String, TaskDetailProgressInfo> detailProgressMap) {
+//
+//        return details.stream()
+//                .map(detail -> {
+//                    TaskDetailProgressInfo progressInfo = detailProgressMap.get(String.valueOf(detail.getTableType()));
+//
+//                    return TableProgressVO.builder()
+//                            .tableType(detail.getTableType())
+//                            .tableName(getTableDisplayName(TableTypeEnum.getByType(detail.getTableType())))
+//                            .status(detail.getStatus())
+//                            .progress(progressInfo != null ? progressInfo.getProgress() : detail.getProgressPercent())
+//                            .currentMessage(progressInfo != null ? progressInfo.getMessage() : "")
+//                            .totalRecords(detail.getTotalRows())
+//                            .successRecords(detail.getSuccessRows())
+//                            .failedRecords(detail.getFailedRows())
+//                            .startTime(detail.getStartTime())
+//                            .endTime(detail.getEndTime())
+//                            .build();
+//                })
+//                .collect(Collectors.toList());
+//    }
+//}

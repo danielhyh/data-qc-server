@@ -23,10 +23,6 @@ public class ImportTaskSaveReqVO {
     @NotEmpty(message = "任务名称不能为空")
     private String taskName;
 
-    @Schema(description = "导入类型:1-单文件,2-压缩包", requiredMode = Schema.RequiredMode.REQUIRED, example = "1")
-    @NotNull(message = "导入类型:1-单文件,2-压缩包不能为空")
-    private Integer importType;
-
     @Schema(description = "原始文件名称", requiredMode = Schema.RequiredMode.REQUIRED, example = "李四")
     @NotEmpty(message = "原始文件名称不能为空")
     private String fileName;
